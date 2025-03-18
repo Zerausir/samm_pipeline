@@ -1,0 +1,234 @@
+x-airflow-common:
+  &airflow-common
+  # Cambiamos la imagen por nuestra imagen personalizada
+  # Necesitarás construir esta imagen primero con: docker build -f Dockerfile.airflow -t custom-airflow:2.7.3 .
+  image: custom-airflow:2.7.3
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: 'America/New_York'
+    PYTHONPATH: '/opt/airflow'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./app:/opt/airflow/app
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 5s
+      retries: 5
+    restart: always
+    ports:
+      - 5432:5432
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - 8080:8080
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: [ "CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"' ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        function ver() {
+          printf "%04d%04d%04d%04d" $${1//[^0-9]/ }
+        }
+        airflow_version=$$(AIRFLOW__LOGGING__LOGGING_LEVEL=INFO && gosu airflow airflow version)
+        airflow_version_comparable=$$(ver $${airflow_version})
+        min_airflow_version=2.2.0
+        min_airflow_version_comparable=$$(ver $${min_airflow_version})
+        if (( airflow_version_comparable < min_airflow_version_comparable )); then
+          echo
+          echo -e "\033[1;31mERROR!!!: Too old Airflow version $${airflow_version}!\e[0m"
+          echo "The minimum Airflow version supported: $${min_airflow_version}. Only use this or higher!"
+          echo
+          exit 1
+        fi
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
+          echo "If you are on Linux, you SHOULD follow the instructions below to set "
+          echo "AIRFLOW_UID environment variable, otherwise files will be owned by root."
+          echo "For other operating systems you can get rid of the warning with manually created .env file:"
+          echo "    See: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#setting-the-right-airflow-user"
+          echo
+        fi
+        one_meg=1048576
+        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
+        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
+        disk_available=$$(df / | tail -1 | awk '{print $$4}')
+        disk_available=$$(($${disk_available} / one_meg))
+        if (( mem_available < 4000 )) ; then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough memory available for Docker.\e[0m"
+          echo "At least 4GB of memory required. You have $$(numfmt --to iec $$((mem_available * one_meg)))"
+          echo
+        fi
+        if (( cpus_available < 2 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough CPUS available for Docker.\e[0m"
+          echo "At least 2 CPUs recommended. You have $${cpus_available}"
+          echo
+        fi
+        if (( disk_available < 10 )); then
+          echo
+          echo -e "\033[1;33mWARNING!!!: Not enough Disk space available for Docker.\e[0m"
+          echo "At least 10 GiB recommended. You have $$(numfmt --to iec $$((disk_available * one_meg)))"
+          echo
+        fi
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+    user: "0:0"
+    volumes:
+      - ./airflow:/sources
+
+  # Redis es necesario para Superset
+  redis:
+    image: redis:7
+    restart: always
+    ports:
+      - 6379:6379
+    volumes:
+      - redis-data:/data
+
+  # Base de datos para Superset
+  superset-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+      POSTGRES_DB: superset
+    volumes:
+      - superset-db-volume:/var/lib/postgresql/data
+    ports:
+      - 5433:5432
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "superset" ]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  # Servicio de Superset
+  superset:
+    image: apache/superset:latest
+    depends_on:
+      - superset-db
+      - redis
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-'insecure_key_for_dev_only_change_me'}
+      SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@superset-db:5432/superset
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PYTHONPATH: /app/pythonpath
+      SUPERSET_LOAD_EXAMPLES: 'no'
+      SUPERSET_PORT: 8088
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      FLASK_APP: "superset.app:create_app()"
+      # Variables para conectar a tu base de datos principal
+      POSTGRES_HOST: host.docker.internal
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-DATA_ENG}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      MAPBOX_API_KEY: ${MAPBOX_API_KEY:-''}
+    volumes:
+      - ./superset:/app/pythonpath
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+      - superset-data:/app/superset_home
+    ports:
+      - 8088:8088
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8088/health" ]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+    command: >
+      bash -c "pip install psycopg2-binary environs pyodbc geopandas openpyxl pykml pandas shapely numpy sqlalchemy &&
+              superset db upgrade && 
+              (superset fab create-admin
+                        --username admin
+                        --firstname Superset
+                        --lastname Admin
+                        --email admin@superset.com
+                        --password admin || true) &&
+              superset init &&
+              superset run -h 0.0.0.0 -p 8088 --with-threads --reload"
+
+  # Contenedor para ejecutar procesamiento de datos externo
+  data-processor:
+    image: python:3.11
+    volumes:
+      - ./app:/app
+    environment:
+      POSTGRES_HOST: host.docker.internal
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-DATA_ENG}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    working_dir: /app
+    command: >
+      bash -c "pip install psycopg2-binary geopandas pyodbc environs openpyxl pykml pandas shapely numpy sqlalchemy &&
+              sleep infinity"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres-db-volume:
+  superset-db-volume:
+  redis-data:
+  superset-data:

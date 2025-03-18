@@ -1,0 +1,34 @@
+FROM apache/airflow:2.7.3-python3.11
+
+USER root
+
+# Instalar dependencias del sistema para geopandas y otras bibliotecas
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libgdal-dev \
+        libspatialindex-dev \
+        unixodbc-dev \
+        unixodbc \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+USER airflow
+
+# Instalar dependencias de Python
+RUN pip install --no-cache-dir \
+    psycopg2-binary \
+    geopandas \
+    pyodbc \
+    environs \
+    openpyxl \
+    pykml \
+    shapely \
+    pandas \
+    numpy \
+    sqlalchemy \
+    fiona \
+    pyproj
+
+# Volvemos al entrypoint de la imagen original
+ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]
