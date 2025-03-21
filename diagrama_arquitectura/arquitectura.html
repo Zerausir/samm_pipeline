@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arquitectura de la Aplicación</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f8f9fa;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header {
+            width: 100%;
+            background-color: #0d6efd;
+            color: white;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .header h2 {
+            margin: 0;
+            font-size: 22px;
+            font-weight: bold;
+        }
+
+        .diagram-container {
+            position: relative;
+            width: 100%;
+            height: 650px; /* Aumentado aún más para tener más espacio vertical */
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        rect.component {
+            rx: 8px;
+        }
+
+        .icon-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .tooltip {
+            background-color: black;
+            color: white;
+            font-size: 12px;
+            padding: 12px;
+            border-radius: 4px;
+            opacity: 0.9;
+            max-width: 300px;
+            z-index: 100;
+        }
+
+        .controls {
+            width: 100%;
+            background-color: #e9ecef;
+            padding: 16px;
+        }
+
+        .button-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .step-button {
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+            background-color: #dee2e6;
+            transition: background-color 0.3s;
+        }
+
+        .step-button.active {
+            background-color: #0d6efd;
+            color: white;
+        }
+
+        .description {
+            padding: 16px;
+            background-color: #fff3cd;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .description p {
+            margin: 8px 0;
+            font-size: 14px;
+        }
+
+        .description p:first-child {
+            font-weight: bold;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; r: 4px; }
+            50% { opacity: 0.6; r: 6px; }
+            100% { opacity: 1; r: 4px; }
+        }
+
+        .pulse-circle {
+            animation: pulse 1s infinite;
+        }
+
+        .data-detail {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 10;
+            width: 300px;
+            display: none;
+            max-height: 500px;
+            overflow-y: auto;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+        }
+
+        /* Estilos para las miniaturas de logos */
+        .logo-mini {
+            width: 20px;
+            height: 20px;
+            position: absolute;
+            bottom: -10px;
+            right: -10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2 id="title">Arquitectura de la Aplicación - 1. Inicialización del Sistema</h2>
+        </div>
+
+        <div class="diagram-container">
+            <svg viewBox="0 0 1000 600" id="diagram"></svg>
+            <div id="dataProcessorDetail" class="data-detail"></div>
+        </div>
+
+        <div class="controls">
+            <div class="button-container" id="buttons">
+                <!-- Botones se generarán aquí -->
+            </div>
+        </div>
+
+        <div class="description">
+            <p>Descripción del paso actual:</p>
+            <p id="description">Airflow inicializa el sistema configurando la base de datos PostgreSQL con las tablas necesarias.</p>
+        </div>
+    </div>
+
+    <script>
+        // Definición de componentes y sus posiciones con más separación
+        const components = [
+            { id: 'postgres', name: 'PostgreSQL', x: 20, y: 190, color: '#336791', icon: 'database', logo: 'postgresql_logo.png', desc: 'Base de datos principal para Airflow y datos de la aplicación. Almacena los resultados procesados del ETL.' },
+            { id: 'airflow-init', name: 'Airflow Init', x: 170, y: 60, color: '#0d9ddb', icon: 'cog', logo: 'airflow_logo.png', desc: 'Inicializa y configura el ambiente de Airflow, creando tablas en PostgreSQL para metadata de DAGs.' },
+            { id: 'airflow-scheduler', name: 'Airflow Scheduler', x: 170, y: 150, color: '#0d9ddb', icon: 'clock', logo: 'airflow_logo.png', desc: 'Programa y ejecuta DAGs según su calendario (9:00 y 14:00 diariamente) y monitorea su ejecución.' },
+            { id: 'airflow-webserver', name: 'Airflow Webserver', x: 170, y: 240, color: '#0d9ddb', icon: 'server', logo: 'airflow_logo.png', desc: 'Interfaz web para monitorear y administrar workflows, permite visualizar y controlar el DAG superset_etl_pipeline.' },
+            { id: 'data-processor', name: 'Data Processor', x: 340, y: 190, color: '#4CAF50', icon: 'etl', logo: 'python_logo.png', desc: 'Procesa datos de mediciones móviles, extrae datos SQL Server, transforma con pandas y geopandas, y los almacena en PostgreSQL. Luego crea vistas optimizadas para visualización.' },
+            { id: 'mssql', name: 'SAMM SQL Server', x: 220, y: 340, color: '#CC2927', icon: 'database', logo: 'sqlserver_logo.png', desc: 'Base de datos externa que contiene mediciones de telemetría móvil, incluyendo datos de ubicación y métricas de rendimiento de red.' },
+            { id: 'geojson', name: 'GeoJSON', x: 420, y: 340, color: '#F7DF1E', icon: 'file', logo: 'geojson_logo.png', desc: 'Archivos de shapefile con información geográfica de regiones, utilizados para mapear mediciones a ubicaciones geográficas.' },
+            { id: 'superset-db', name: 'Superset DB', x: 480, y: 240, color: '#336791', icon: 'database', logo: 'postgresql_logo.png', desc: 'Base de datos PostgreSQL para metadata de Superset, almacena dashboards, gráficos y configuraciones.' },
+            { id: 'redis', name: 'Redis', x: 480, y: 120, color: '#DC382D', icon: 'database', logo: 'redis_logo.png', desc: 'Cache para resultados de consultas y sesiones, mejora el rendimiento de Superset.' },
+            { id: 'superset', name: 'Superset', x: 620, y: 190, color: '#00A699', icon: 'chart', logo: 'superset_logo.png', desc: 'Plataforma de análisis y visualización de datos que consume las vistas optimizadas creadas por el Data Processor.' },
+            { id: 'nginx-proxy', name: 'Nginx Proxy', x: 760, y: 190, color: '#009639', icon: 'server', logo: 'nginx_logo.png', desc: 'Reverse proxy para HTTPS y balanceo de carga, punto de entrada para los usuarios finales.' }
+        ];
+
+        // URLs de los logos para cada tecnología
+        const logoUrls = {
+            'postgresql_logo.png': 'https://www.postgresql.org/media/img/about/press/elephant.png',
+            'airflow_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/AirflowLogo.png/1200px-AirflowLogo.png',
+            'python_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Python-logo-notext.svg/1869px-Python-logo-notext.svg.png',
+            'sqlserver_logo.png': 'https://cdn-icons-png.flaticon.com/512/5968/5968364.png',
+            'geojson_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/f3/Emblem-earth.svg/1024px-Emblem-earth.svg.png',
+            'redis_logo.png': 'https://cdn4.iconfinder.com/data/icons/redis-2/1451/Untitled-2-512.png',
+            'superset_logo.png': 'https://github.com/apache/superset/raw/master/superset-frontend/src/assets/images/superset-logo-horiz.png',
+            'nginx_logo.png': 'https://cdn.icon-icons.com/icons2/2699/PNG/512/nginx_logo_icon_169915.png',
+            'pandas_logo.png': 'https://pandas.pydata.org/static/img/pandas_mark.svg',
+            'geopandas_logo.png': 'https://geopandas.org/en/stable/_static/geopandas_logo.png',
+            'docker_logo.png': 'https://www.docker.com/wp-content/uploads/2022/03/Moby-logo.png'
+        };
+
+        // Definición de los flujos de datos que se animarán
+        const flows = [
+            // 0: Inicialización de Airflow
+            [
+                { from: 'airflow-init', to: 'postgres', active: true }
+            ],
+            // 1: Scheduler consulta trabajos
+            [
+                { from: 'airflow-scheduler', to: 'postgres', active: true }
+            ],
+            // 2: Procesamiento de datos
+            [
+                { from: 'airflow-webserver', to: 'airflow-scheduler', active: true },
+                { from: 'airflow-scheduler', to: 'data-processor', active: true }
+            ],
+            // 3: Data processor actualiza datos
+            [
+                { from: 'mssql', to: 'data-processor', active: true },
+                { from: 'geojson', to: 'data-processor', active: true },
+                { from: 'data-processor', to: 'postgres', active: true }
+            ],
+            // 4: Superset consulta datos
+            [
+                { from: 'superset', to: 'redis', active: true },
+                { from: 'superset', to: 'superset-db', active: true }
+            ],
+            // 5: Superset consulta datos procesados
+            [
+                { from: 'superset', to: 'postgres', active: true }
+            ],
+            // 6: Usuario accede a través de Nginx
+            [
+                { from: 'nginx-proxy', to: 'superset', active: true }
+            ]
+        ];
+
+        // Recopilar todas las conexiones únicas que se utilizan en cualquier flujo
+        const allConnections = new Set();
+        flows.forEach(flow => {
+            flow.forEach(connection => {
+                allConnections.add(`${connection.from}-${connection.to}`);
+            });
+        });
+
+        // Detalles del procesamiento de datos para cada paso del Data Processor
+        const dataProcessorSteps = [
+            {
+                title: "Extracción de datos (main.py)",
+                content: `
+                <ul>
+                    <li>Carga variables de entorno</li>
+                    <li>Conexión al SQL Server del SAMM con pyodbc</li>
+                    <li>Extrae datos de mediciones móviles</li>
+                    <li>Lee archivos shape (GeoJSON) con geopandas</li>
+                </ul>
+                <div style="text-align: right"><img src="${logoUrls['pandas_logo.png']}" style="width: 20px; height: 20px; margin-right: 5px;"><img src="${logoUrls['python_logo.png']}" style="width: 20px; height: 20px;"></div>
+                `
+            },
+            {
+                title: "Transformación de datos (main.py)",
+                content: `
+                <ul>
+                    <li>Limpia y normaliza nombres de columnas</li>
+                    <li>Convierte tipos de datos (timestamps, float)</li>
+                    <li>Calcula métricas de throughput (Mbps)</li>
+                    <li>Filtra datos inválidos y duplicados</li>
+                    <li>Combina datos de diferentes fuentes</li>
+                </ul>
+                <div style="text-align: right"><img src="${logoUrls['pandas_logo.png']}" style="width: 20px; height: 20px; margin-right: 5px;"><img src="${logoUrls['geopandas_logo.png']}" style="width: 20px; height: 20px;"></div>
+                `
+            },
+            {
+                title: "Mapeo espacial (update_mapping.py)",
+                content: `
+                <ul>
+                    <li>Crea tabla de mapeo de ubicaciones</li>
+                    <li>Relaciona coordenadas con regiones geográficas</li>
+                    <li>Establece mapeo entre mediciones y áreas</li>
+                    <li>Optimiza datos para consultas geoespaciales</li>
+                </ul>
+                <div style="text-align: right"><img src="${logoUrls['geopandas_logo.png']}" style="width: 20px; height: 20px; margin-right: 5px;"><img src="${logoUrls['postgresql_logo.png']}" style="width: 20px; height: 20px;"></div>
+                `
+            },
+            {
+                title: "Creación de vistas (create_dashboard_view.py)",
+                content: `
+                <ul>
+                    <li>Crea vista dashboard_view con datos principales</li>
+                    <li>Crea vista dashboard_view_visualization para mapas</li>
+                    <li>Crea geographic_view para visualización por regiones</li>
+                    <li>Crea vista materializada region_performance_summary</li>
+                    <li>Crea índices para optimizar consultas</li>
+                </ul>
+                <div style="text-align: right"><img src="${logoUrls['postgresql_logo.png']}" style="width: 20px; height: 20px; margin-right: 5px;"><img src="${logoUrls['superset_logo.png']}" style="width: 20px; height: 20px;"></div>
+                `
+            }
+        ];
+
+        // Etiquetas para cada paso del flujo
+        const flowLabels = [
+            "1. Inicialización del Sistema",
+            "2. Scheduler consulta la base de datos",
+            "3. Ejecución de DAGs de procesamiento",
+            "4. Actualización de datos en PostgreSQL",
+            "5. Superset consulta metadata y cache",
+            "6. Superset consulta datos procesados",
+            "7. Usuario accede a través de HTTPS"
+        ];
+
+        const descriptions = [
+            "Airflow inicializa el sistema configurando la base de datos PostgreSQL con las tablas necesarias para almacenar metadata de DAGs, variables y conexiones.",
+            "El scheduler de Airflow consulta periódicamente la base de datos para verificar qué DAGs debe ejecutar según su programación (9:00 y 14:00 diariamente).",
+            "Cuando el DAG 'superset_etl_pipeline' se activa, el scheduler instruye al webserver y activa el proceso de ETL con el Data Processor.",
+            "El Data Processor ejecuta una secuencia de scripts (main.py, update_mapping.py, create_dashboard_view.py) que extraen datos de SQL Server y archivos GeoJSON, los transforman y los cargan en PostgreSQL.",
+            "Superset consulta su propia base de datos y el caché de Redis para configuración, permisos y resultados de consultas previas.",
+            "Superset consulta los datos procesados y las vistas optimizadas directamente desde PostgreSQL para crear visualizaciones y dashboards.",
+            "Los usuarios acceden a las visualizaciones a través de Nginx, que proporciona seguridad HTTPS y balanceo de carga para la interfaz de Superset."
+        ];
+
+        // Iconos simplificados en SVG
+        const icons = {
+            database: `<rect x="3" y="3" width="14" height="18" rx="2" fill="white" fill-opacity="0.3"></rect>
+                      <rect x="6" y="7" width="8" height="2" rx="1" fill="white"></rect>
+                      <rect x="6" y="11" width="8" height="2" rx="1" fill="white"></rect>
+                      <rect x="6" y="15" width="8" height="2" rx="1" fill="white"></rect>`,
+
+            cog: `<circle cx="10" cy="10" r="7" fill="white" fill-opacity="0.3"></circle>
+                 <path d="M10 5 L10 15 M5 10 L15 10 M7 7 L13 13 M13 7 L7 13" stroke="white" stroke-width="1.5"></path>`,
+
+            clock: `<circle cx="10" cy="10" r="7" fill="white" fill-opacity="0.3"></circle>
+                   <line x1="10" y1="10" x2="10" y2="6" stroke="white" stroke-width="1.5"></line>
+                   <line x1="10" y1="10" x2="13" y2="10" stroke="white" stroke-width="1.5"></line>`,
+
+            server: `<rect x="5" y="5" width="10" height="14" rx="1" fill="white" fill-opacity="0.3"></rect>
+                    <line x1="7" y1="8" x2="13" y2="8" stroke="white" stroke-width="1.5"></line>
+                    <line x1="7" y1="12" x2="13" y2="12" stroke="white" stroke-width="1.5"></line>
+                    <line x1="7" y1="16" x2="13" y2="16" stroke="white" stroke-width="1.5"></line>`,
+
+            chart: `<rect x="5" y="14" width="3" height="6" fill="white" fill-opacity="0.6"></rect>
+                   <rect x="10" y="10" width="3" height="10" fill="white" fill-opacity="0.6"></rect>
+                   <rect x="15" y="6" width="3" height="14" fill="white" fill-opacity="0.6"></rect>`,
+
+            file: `<path d="M5,3 L13,3 L16,6 L16,17 L5,17 Z" fill="white" fill-opacity="0.3"></path>
+                  <path d="M13,3 L13,6 L16,6" fill="none" stroke="white" stroke-width="1"></path>
+                  <line x1="7" y1="9" x2="14" y2="9" stroke="white" stroke-width="1"></line>
+                  <line x1="7" y1="12" x2="14" y2="12" stroke="white" stroke-width="1"></line>
+                  <line x1="7" y1="15" x2="12" y2="15" stroke="white" stroke-width="1"></line>`,
+
+            etl: `<rect x="3" y="3" width="14" height="14" rx="2" fill="white" fill-opacity="0.3"></rect>
+                 <path d="M6,7 L14,7 L10,12 Z" fill="white" fill-opacity="0.6"></path>
+                 <line x1="5" y1="14" x2="15" y2="14" stroke="white" stroke-width="1.5"></line>`
+        };
+
+        let activeFlow = 0;
+        let activeInterval = null;
+        let showTooltip = null;
+
+        // Función para comprobar si una conexión existe en cualquier flujo
+        function connectionExists(from, to) {
+            return allConnections.has(`${from}-${to}`);
+        }
+
+        // Función para dibujar una línea entre dos componentes
+        function getLine(from, to, isActive) {
+            const fromComp = components.find(c => c.id === from);
+            const toComp = components.find(c => c.id === to);
+
+            if (!fromComp || !toComp) return null;
+
+            // Calcular puntos para la línea
+            const x1 = fromComp.x + 30;
+            const y1 = fromComp.y + 30;
+            const x2 = toComp.x + 30;
+            const y2 = toComp.y + 30;
+
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute("x1", x1);
+            line.setAttribute("y1", y1);
+            line.setAttribute("x2", x2);
+            line.setAttribute("y2", y2);
+            line.setAttribute("stroke", isActive ? "#ff6b6b" : "#ccc");
+            line.setAttribute("stroke-width", isActive ? 3 : 2);
+            line.setAttribute("stroke-dasharray", isActive ? "0" : "5,5");
+
+            const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            g.appendChild(line);
+
+            if (isActive) {
+                const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+                circle.setAttribute("cx", (x1 + x2) / 2);
+                circle.setAttribute("cy", (y1 + y2) / 2);
+                circle.setAttribute("r", 4);
+                circle.setAttribute("fill", "#ff6b6b");
+                circle.classList.add("pulse-circle");
+                g.appendChild(circle);
+            }
+
+            return g;
+        }
+
+        function showDataProcessorDetails() {
+            const detailElement = document.getElementById('dataProcessorDetail');
+            if (activeFlow === 3) { // Solo en el paso de procesamiento de datos
+                // Calcular la posición del contenedor de detalles
+                const dataProcessorComp = components.find(c => c.id === 'data-processor');
+                if (!dataProcessorComp) return;
+
+                let html = '<h4 style="margin-top: 0; color: #4CAF50;">Etapas del Data Processor:</h4>';
+
+                dataProcessorSteps.forEach((step, index) => {
+                    html += `<div style="margin-bottom: 12px; background-color: rgba(76, 175, 80, 0.1); padding: 8px; border-radius: 4px;">
+                        <div style="font-weight: bold; margin-bottom: 4px;">${step.title}</div>
+                        <div style="font-size: 11px;">${step.content}</div>
+                    </div>`;
+                });
+
+                detailElement.innerHTML = html;
+                detailElement.style.display = 'block';
+                detailElement.style.top = '50px';
+                detailElement.style.right = '20px';
+
+                // Asegurar que los logos se muestren correctamente
+                setTimeout(() => {
+                    const images = detailElement.querySelectorAll('img');
+                    images.forEach(img => {
+                        img.onerror = function() {
+                            this.src = logoUrls['python_logo.png']; // Imagen de respaldo
+                        };
+                    });
+                }, 100);
+            } else {
+                detailElement.style.display = 'none';
+            }
+        }
+
+        // Función para renderizar el diagrama
+        function renderDiagram() {
+            const svg = document.getElementById("diagram");
+            svg.innerHTML = "";
+
+            // Dibujar conexiones existentes inactivas
+            allConnections.forEach(connection => {
+                const [from, to] = connection.split('-');
+                const isActive = flows[activeFlow].some(flow =>
+                    flow.from === from && flow.to === to && flow.active
+                );
+
+                if (!isActive) {
+                    const line = getLine(from, to, false);
+                    if (line) svg.appendChild(line);
+                }
+            });
+
+            // Dibujar líneas activas del flujo actual
+            flows[activeFlow].forEach(flow => {
+                const line = getLine(flow.from, flow.to, flow.active);
+                if (line) svg.appendChild(line);
+            });
+
+            // Dibujar componentes
+            components.forEach(comp => {
+                const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+                g.id = comp.id;
+
+                // Crear rectángulo del componente
+                const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                rect.setAttribute("x", comp.x);
+                rect.setAttribute("y", comp.y);
+                rect.setAttribute("width", 60);
+                rect.setAttribute("height", 60);
+                rect.setAttribute("rx", 8);
+                rect.setAttribute("fill", comp.color);
+                rect.setAttribute("opacity", flows[activeFlow].some(f => f.from === comp.id || f.to === comp.id) ? 1 : 0.7);
+                g.appendChild(rect);
+
+                // Crear icono
+                const iconGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+                iconGroup.innerHTML = icons[comp.icon];
+                iconGroup.setAttribute("transform", `translate(${comp.x + 15}, ${comp.y + 15})`);
+                g.appendChild(iconGroup);
+
+                // Crear texto
+                const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+                text.setAttribute("x", comp.x + 30);
+                text.setAttribute("y", comp.y + 80);
+                text.setAttribute("text-anchor", "middle");
+                text.setAttribute("font-size", 11);
+                text.setAttribute("fill", "#333");
+                text.setAttribute("font-weight", "bold");
+                text.textContent = comp.name;
+                g.appendChild(text);
+
+                // Tamaños personalizados para logos específicos
+                const logoSizes = {
+                    'airflow_logo.png': 30,
+                    'python_logo.png': 30,
+                    'sqlserver_logo.png': 30,
+                    'superset_logo.png': 30,
+                    'postgresql_logo.png': 24,
+                    'redis_logo.png': 24,
+                    'nginx_logo.png': 24,
+                    'geojson_logo.png': 24
+                };
+
+                // Agregar logo miniatura (svg image)
+                if (comp.logo && logoUrls[comp.logo]) {
+                    const logoImage = document.createElementNS("http://www.w3.org/2000/svg", "image");
+                    logoImage.setAttribute("href", logoUrls[comp.logo]);
+
+                    // Usar tamaño personalizado si está definido, de lo contrario usar tamaño predeterminado
+                    const logoSize = logoSizes[comp.logo] || 24;
+
+                    logoImage.setAttribute("x", comp.x + 60 - logoSize/2);
+                    logoImage.setAttribute("y", comp.y + 60 - logoSize/2);
+                    logoImage.setAttribute("width", logoSize);
+                    logoImage.setAttribute("height", logoSize);
+                    logoImage.setAttribute("style", "filter: drop-shadow(0px 0px 2px white);");
+                    g.appendChild(logoImage);
+                }
+
+                // Agregar tooltips personalizados a cada componente
+                const tooltip = document.createElement('div');
+                tooltip.style.position = 'absolute';
+                tooltip.style.display = 'none';
+                tooltip.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+                tooltip.style.color = 'white';
+                tooltip.style.padding = '10px';
+                tooltip.style.borderRadius = '5px';
+                tooltip.style.zIndex = '100';
+                tooltip.style.fontSize = '12px';
+                tooltip.style.maxWidth = '250px';
+                document.body.appendChild(tooltip);
+
+                // Evento para mostrar tooltip personalizado sobre componentes activos
+                g.addEventListener('mouseover', (e) => {
+                    if (flows[activeFlow].some(f => f.from === comp.id || f.to === comp.id)) {
+                        tooltip.innerHTML = comp.desc;
+                        tooltip.style.display = 'block';
+                        tooltip.style.left = (e.pageX + 10) + 'px';
+                        tooltip.style.top = (e.pageY + 10) + 'px';
+                    }
+                });
+
+                g.addEventListener('mousemove', (e) => {
+                    if (tooltip.style.display === 'block') {
+                        tooltip.style.left = (e.pageX + 10) + 'px';
+                        tooltip.style.top = (e.pageY + 10) + 'px';
+                    }
+                });
+
+                g.addEventListener('mouseout', () => {
+                    tooltip.style.display = 'none';
+                });
+
+                svg.appendChild(g);
+            });
+
+            // Actualizar título y descripción
+            document.getElementById("title").textContent = `Arquitectura de la Aplicación - ${flowLabels[activeFlow]}`;
+            document.getElementById("description").textContent = descriptions[activeFlow];
+
+            // Mostrar detalles del data processor cuando está activo
+            showDataProcessorDetails();
+        }
+
+        function renderTooltip(comp) {
+            removeTooltip(); // Eliminar cualquier tooltip existente
+
+            const foreignObject = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+            foreignObject.setAttribute("x", comp.x - 100);
+            foreignObject.setAttribute("y", comp.y - 60);
+            foreignObject.setAttribute("width", 300);
+            foreignObject.setAttribute("height", 100);
+            foreignObject.setAttribute("id", "tooltip");
+
+            const div = document.createElement("div");
+            div.className = "tooltip";
+            div.textContent = comp.desc;
+
+            foreignObject.appendChild(div);
+            document.getElementById("diagram").appendChild(foreignObject);
+        }
+
+        function removeTooltip() {
+            const tooltip = document.getElementById("tooltip");
+            if (tooltip) {
+                tooltip.remove();
+            }
+        }
+
+        // Función para inicializar los botones
+        function initButtons() {
+            const buttonContainer = document.getElementById("buttons");
+            buttonContainer.innerHTML = "";
+
+            flowLabels.forEach((label, idx) => {
+                const button = document.createElement("button");
+                button.className = `step-button ${idx === activeFlow ? "active" : ""}`;
+                button.textContent = idx + 1;
+                button.addEventListener("click", () => {
+                    setActiveFlow(idx);
+                });
+                buttonContainer.appendChild(button);
+            });
+        }
+
+        // Función para cambiar el flujo activo
+        function setActiveFlow(idx) {
+            activeFlow = idx;
+            renderDiagram();
+
+            // Actualizar botones
+            document.querySelectorAll(".step-button").forEach((btn, i) => {
+                btn.className = `step-button ${i === activeFlow ? "active" : ""}`;
+            });
+
+            // Reiniciar intervalo automático
+            if (activeInterval) {
+                clearInterval(activeInterval);
+            }
+            startAutoInterval();
+        }
+
+        // Función para iniciar intervalo automático
+        function startAutoInterval() {
+            // Desactivado por solicitud del usuario
+            //activeInterval = setInterval(() => {
+            //    setActiveFlow((activeFlow + 1) % 7);
+            //}, 5000);
+        }
+
+        // Inicializar el diagrama
+        function init() {
+            renderDiagram();
+            initButtons();
+            startAutoInterval();
+        }
+
+        // Iniciar cuando el DOM esté listo
+        document.addEventListener("DOMContentLoaded", init);
+    </script>
+</body>
+</html>

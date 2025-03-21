@@ -22,6 +22,12 @@ APP_NAME = "Superset"
 WTF_CSRF_ENABLED = True
 WTF_CSRF_SSL_STRICT = True
 
+# Configuración HTTPS
+ENABLE_PROXY_FIX = True
+WEBSERVER_PROTOCOL = env("SUPERSET_WEBSERVER_PROTOCOL", default="https")
+WEBSERVER_ADDRESS = env("SUPERSET_WEBSERVER_ADDRESS", default="0.0.0.0")
+PREFERRED_URL_SCHEME = "https"
+
 # Habilitar JavaScript y controles avanzados
 ENABLE_JAVASCRIPT_CONTROLS = True
 
