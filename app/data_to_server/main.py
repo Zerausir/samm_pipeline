@@ -1,74 +1,72 @@
 import os
 import pandas as pd
 import geopandas as gpd
-import sqlalchemy as sa
-from sqlalchemy.engine import URL
-from sqlalchemy import create_engine
-from dotenv import load_dotenv
 import datetime
 from app.utils.postgres_handler import get_postgres_handler
 
 
+def get_env_var(var_name, default=None):
+    """Get environment variable, optionally loading from .env file"""
+    value = os.environ.get(var_name)
+    if value is None:
+        # Only load from .env if the variable isn't already set
+        from dotenv import load_dotenv
+        load_dotenv()
+        value = os.environ.get(var_name)
+    return value if value is not None else default
+
+
 def main():
-    # Load environment variables
-    load_dotenv()
+    print("Iniciando proceso ETL...")
 
     # Initialize PostgreSQL handler
     postgres_handler = get_postgres_handler(
-        host=os.getenv('POSTGRES_HOST'),
-        port=os.getenv('POSTGRES_PORT'),
-        database=os.getenv('POSTGRES_DB'),
-        user=os.getenv('POSTGRES_USER'),
-        password=os.getenv('POSTGRES_PASSWORD')
+        host=get_env_var('POSTGRES_HOST'),
+        port=get_env_var('POSTGRES_PORT'),
+        database=get_env_var('POSTGRES_DB'),
+        user=get_env_var('POSTGRES_USER'),
+        password=get_env_var('POSTGRES_PASSWORD')
     )
+    print(f"Conexión a PostgreSQL establecida: {get_env_var('POSTGRES_HOST')}:{get_env_var('POSTGRES_PORT')}")
 
     # Create tables if they don't exist
     postgres_handler.create_tables()
+    print("Tablas verificadas/creadas en PostgreSQL")
 
     # Read the GeoJSON file
-    gdf = gpd.read_file(f"{os.getenv('geojson_route')}/shapefile.shp")
+    gdf = gpd.read_file(f"{get_env_var('geojson_route')}/shapefile.shp")
     gdf = gdf.sort_values(['DPA_DESPRO', 'DPA_DESCAN', 'DPA_DESPAR'])
-
-    # Define the date range
-    fecha_inicio = datetime.datetime(2025, 1, 1)
-    fecha_fin = datetime.datetime.now()
-
-    # Format dates for SQL Server
-    fecha_inicio_str = fecha_inicio.strftime('%Y-%m-%d %H:%M:%S')
-    fecha_fin_str = fecha_fin.strftime('%Y-%m-%d %H:%M:%S')
-
-    # SQL Server connection and queries
-    sql_query1 = f"SELECT DatasourceId, SessionIdOrCallIndex, SessionType, StartTime, StartLatitude, " \
-                 f"StartLongitude, StartRadioTechnology, EndTime, EndLatitude, EndLongitude, " \
-                 f"EndRadioTechnology, SimOperator, IMSI, IMEI, SessionEndStatus " \
-                 f"FROM {os.getenv('TABLE1')} " \
-                 f"WHERE StartTime >= '{fecha_inicio_str}' AND EndTime <= '{fecha_fin_str}';"
-    sql_query2 = f"SELECT DatasourceId, SessionId, SessionType, StartDateTime, EndDateTime, Url, " \
-                 f"EndServiceBearer, EndDataRadioBearer, EndFileSize, EndServiceStatus, " \
-                 f"IPServiceSetupTimeMethodAMethod, DataTransferTimeMethodADuration " \
-                 f"FROM {os.getenv('TABLE2')} " \
-                 f"WHERE StartDateTime >= '{fecha_inicio_str}' AND EndDateTime <= '{fecha_fin_str}';"
+    print(f"Archivo shapefile cargado. Filas: {len(gdf)}")
 
     try:
-        # Create the engine according to SQLAlchemy documentation
-        connection_string = f"DRIVER={os.getenv('DRIVER_NAME')};SERVER={os.getenv('SERVER_NAME')};" \
-                            f"DATABASE={os.getenv('DATABASE_NAME')};Trusted_Connection=yes;"
-        connection_url = URL.create("mssql+pyodbc", query={"odbc_connect": connection_string})
-        engine = create_engine(connection_url)
+        # Leer los datos pre-extraídos en vez de conectarse a SQL Server
+        print("Cargando datos pre-extraídos...")
 
-        # Define decimal separator as comma
-        decimal_sep = ","
+        # Definir rutas de archivos
+        data_dir = '/opt/airflow/app/data'  # Ruta en el contenedor
+        df1_file = f"{data_dir}/extract_table1.parquet"
+        df2_file = f"{data_dir}/extract_table2.parquet"
 
-        # Execute queries using SQLAlchemy
-        with engine.connect() as connection:
-            df1 = pd.read_sql_query(sa.text(sql_query1), connection, params={"decimal": decimal_sep})
-            df2 = pd.read_sql_query(sa.text(sql_query2), connection, params={"decimal": decimal_sep})
+        # Verificar si los archivos existen
+        if not os.path.exists(df1_file) or not os.path.exists(df2_file):
+            print(f"ERROR: Archivos de datos no encontrados: {df1_file} o {df2_file}")
+            print("Por favor, ejecuta el script de extracción extract_data.py en tu PC local primero.")
+            return
+
+        # Cargar datos desde archivos Parquet
+        print(f"Leyendo archivo: {df1_file}")
+        df1 = pd.read_parquet(df1_file)
+        print(f"Leyendo archivo: {df2_file}")
+        df2 = pd.read_parquet(df2_file)
+
+        print(f"Datos cargados: {len(df1)} registros de tabla1, {len(df2)} registros de tabla2")
 
     except Exception as e:
-        print(f'SQL Server connection failed: {e}')
+        print(f'Error al cargar los datos pre-extraídos: {e}')
         return
 
     # Rename columns
+    print("Procesando datos...")
     df1 = df1.rename(columns={'SessionIdOrCallIndex': 'SessionId', 'SessionEndStatus': 'EndServiceStatus'})
     df2 = df2.rename(columns={'StartDateTime': 'StartTime', 'EndDateTime': 'EndTime'})
 
@@ -86,16 +84,21 @@ def main():
     df2['EndFileSize'] = df2['EndFileSize'].astype(float)
 
     # Merge dataframes
+    print("Combinando datasets...")
     df = df1.merge(df2, how='right', on=['DatasourceId', 'SessionId', 'SessionType',
                                          'StartTime', 'EndTime', 'EndServiceStatus'])
+    print(f"Resultado del merge: {len(df)} filas")
 
     # Read sense file data
+    print(f"Cargando archivo sense desde: {get_env_var('sense_file')}")
     columns_sense = ['Device', 'IMEI', 'CZO']
-    dfsense = pd.read_excel(os.getenv('sense_file'), usecols=columns_sense)
+    dfsense = pd.read_excel(get_env_var('sense_file'), usecols=columns_sense)
     dfsense['IMEI'] = dfsense['IMEI'].astype(str)
+    print(f"Datos sense cargados: {len(dfsense)} filas")
 
     # Merge with sense data
     df = df.merge(dfsense, how='left', on=['IMEI'])
+    print(f"Después del merge con sense data: {len(df)} filas")
 
     # Calculate throughput
     def calculate_throughput(row):
@@ -117,30 +120,31 @@ def main():
         return None
 
     # Apply throughput calculation
+    print("Calculando throughput...")
     df['ThroughputMbps'] = df.apply(calculate_throughput, axis=1)
 
     # Remove rows with NaN values in critical columns
     df = df.dropna(subset=['StartLatitude', 'StartLongitude', 'EndLatitude', 'EndLongitude', 'ThroughputMbps'])
-    print(f"Processing {len(df)} records...")
+    print(f"Después de filtrar nulos: {len(df)} filas")
 
     # Store data in PostgreSQL
     try:
-        print("Storing measurement data in PostgreSQL...")
+        print("Almacenando datos de mediciones en PostgreSQL...")
         postgres_handler.upsert_measurements(df)
-        print("Measurement data stored successfully!")
+        print("Datos de mediciones almacenados con éxito!")
 
-        print("Checking geographic data status...")
+        print("Verificando estado de datos geográficos...")
         if postgres_handler.should_insert_geographic_data():
-            print("Geographic data not found in database. Proceeding with insertion...")
+            print("Datos geográficos no encontrados en la base de datos. Procediendo con la inserción...")
             postgres_handler.upsert_geographic_data(gdf)
-            print("Geographic data stored successfully!")
+            print("Datos geográficos almacenados con éxito!")
         else:
-            print("Geographic data already exists in database. Skipping insertion.")
+            print("Datos geográficos ya existen en la base de datos. Omitiendo inserción.")
     except Exception as e:
-        print(f"Error storing data in PostgreSQL: {e}")
+        print(f"Error almacenando datos en PostgreSQL: {e}")
         return
 
-    print("Data processing and storage completed successfully!")
+    print("Procesamiento de datos y almacenamiento completado con éxito!")
 
 
 if __name__ == "__main__":

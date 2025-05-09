@@ -130,8 +130,8 @@ services:
       <<: *airflow-common-env
       _AIRFLOW_DB_UPGRADE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
-      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
     user: "0:0"
     volumes:
       - ./airflow:/sources
@@ -181,10 +181,10 @@ services:
       # Variables para conectar a tu base de datos principal
       POSTGRES_HOST: host.docker.internal
       POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-DATA_ENG}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      MAPBOX_API_KEY: ${MAPBOX_API_KEY:-''}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      MAPBOX_API_KEY: ${MAPBOX_API_KEY}
     volumes:
       - ./superset:/app/pythonpath
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py
@@ -229,12 +229,12 @@ services:
     environment:
       POSTGRES_HOST: host.docker.internal
       POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-DATA_ENG}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     working_dir: /app
     command: >
-      bash -c "pip install psycopg2-binary geopandas pyodbc environs openpyxl pykml pandas shapely numpy sqlalchemy &&
+      bash -c "pip install psycopg2-binary geopandas pyodbc environs openpyxl pykml pandas shapely numpy sqlalchemy pyarrow &&
               sleep infinity"
     depends_on:
       - postgres

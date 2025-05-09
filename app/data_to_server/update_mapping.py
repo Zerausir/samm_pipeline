@@ -3,14 +3,24 @@ from dotenv import load_dotenv
 from app.utils.spatial_mapper import get_spatial_mapper
 
 
+def get_env_var(var_name, default=None):
+    """Get environment variable, optionally loading from .env file"""
+    value = os.environ.get(var_name)
+    if value is None:
+        # Only load from .env if the variable isn't already set
+        load_dotenv()
+        value = os.environ.get(var_name)
+    return value if value is not None else default
+
+
 def update_mapping():
-    load_dotenv()
+    # Use get_env_var instead of calling load_dotenv()
     spatial_mapper = get_spatial_mapper(
-        host=os.getenv('POSTGRES_HOST'),
-        port=os.getenv('POSTGRES_PORT'),
-        database=os.getenv('POSTGRES_DB'),
-        user=os.getenv('POSTGRES_USER'),
-        password=os.getenv('POSTGRES_PASSWORD')
+        host=get_env_var('POSTGRES_HOST'),
+        port=get_env_var('POSTGRES_PORT'),
+        database=get_env_var('POSTGRES_DB'),
+        user=get_env_var('POSTGRES_USER'),
+        password=get_env_var('POSTGRES_PASSWORD')
     )
 
     # Create mapping table
