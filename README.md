@@ -1,19 +1,42 @@
-# ETL Pipeline
+# Superset ETL Pipeline
 
 Un pipeline completo de ETL desarrollado con Apache Airflow para procesar datos móviles y de voz, con visualización en
 PowerBI.
 
 ## 🏗️ Arquitectura del Sistema
 
-Este proyecto implementa un pipeline ETL secuencial que procesa datos de telecomunicaciones móviles y de voz, realizando
-mapeo geográfico y preparando vistas optimizadas para análisis en PowerBI.
+Este proyecto implementa un sistema completo de procesamiento de datos de telecomunicaciones que consta de dos etapas
+principales:
 
-### Componentes Principales
+### Flujo Completo de Datos
+
+```
+[SQL Server] → [Extractor AD] → [Archivos Parquet] → [ETL Pipeline] → [PostgreSQL] → [PowerBI]
+     ↓              ↓               ↓                    ↓              ↓            ↓
+  Datos Raw    Usuario AD     Datos Extraídos      Procesamiento    Vistas      Análisis
+                Requerido     (.parquet)           Dockerizado    Optimizadas   Final
+```
+
+### Componentes del Sistema
+
+#### 1. **Extractor de Datos** (Prerequisito)
+
+- **Ubicación**: Proceso separado ejecutado en usuario con Active Directory
+- **Función**: Extrae datos desde SQL Server usando autenticación Windows
+- **Salida**: Archivos Parquet listos para procesamiento
+- **Repositorio**: `samm_extract_data/` (proceso independiente)
+
+#### 2. **Pipeline ETL** (Este proyecto)
 
 - **Apache Airflow**: Orquestación y scheduling del pipeline
 - **PostgreSQL**: Base de datos principal para almacenamiento
 - **Python ETL**: Procesamiento de datos con pandas y geopandas
 - **PowerBI**: Visualización final de datos
+
+### Dependencias entre Procesos
+
+⚠️ **IMPORTANTE**: El ETL Pipeline requiere que el proceso de extracción se haya ejecutado previamente y los archivos
+Parquet estén disponibles en `/app/data/`.
 
 ## 📋 Requisitos del Sistema
 
@@ -25,21 +48,86 @@ mapeo geográfico y preparando vistas optimizadas para análisis en PowerBI.
 - Al menos 8GB de RAM
 - 20GB de espacio en disco
 
-### Archivos de Datos
+### ⚠️ Prerequisitos Críticos
 
-El sistema espera los siguientes archivos en `/app/data/`:
+#### 1. Proceso de Extracción Completado
+
+Antes de ejecutar este pipeline ETL, debe haberse ejecutado el **proceso de extracción de datos** desde un usuario con
+permisos de Active Directory. Este proceso genera los archivos Parquet necesarios.
+
+**Repositorio de Extracción**: `samm_extract_data/`
+
+**Archivos Requeridos** (generados por el extractor):
 
 - `extract_datos_table1.parquet` - Datos móviles tabla 1
 - `extract_datos_table2.parquet` - Datos móviles tabla 2
 - `extract_voz_table1.parquet` - Datos de voz tabla 1
 - `extract_voz_table3.parquet` - Datos de voz tabla 3
 - `extract_voz_table4.parquet` - Datos de voz tabla 4
+
+#### 2. Archivos Adicionales Requeridos
+
+El sistema también espera los siguientes archivos en `/app/data/`:
+
 - `sense_nacional_v0.xlsx` - Datos de dispositivos
-- `states/shapefile.shp` - Archivo geográfico (con archivos asociados)
+- `states/shapefile.shp` - Archivo geográfico (con archivos asociados .shx, .dbf, .prj)
+
+### Verificación de Archivos
+
+Antes de iniciar el pipeline, verificar que todos los archivos estén presentes:
+
+```bash
+ls -la app/data/
+# Debe mostrar:
+# extract_datos_table1.parquet
+# extract_datos_table2.parquet
+# extract_voz_table1.parquet
+# extract_voz_table3.parquet
+# extract_voz_table4.parquet
+# sense_nacional_v0.xlsx
+# states/shapefile.shp (y archivos asociados)
+```
 
 ## 🚀 Instalación y Configuración
 
-### 1. Clonar el Repositorio
+### Paso 0: Ejecutar Proceso de Extracción
+
+⚠️ **PREREQUISITO OBLIGATORIO**: Antes de continuar, debe ejecutar el proceso de extracción de datos desde un usuario
+con acceso al Active Directory.
+
+1. **Cambiar al repositorio de extracción**:
+   ```bash
+   cd samm_extract_data/
+   ```
+
+2. **Configurar variables de entorno del extractor** (crear `.env` en `samm_extract_data/`):
+   ```env
+   SERVER_NAME=tu_servidor_sql
+   DATABASE_NAME=tu_base_de_datos
+   DRIVER_NAME={ODBC Driver 17 for SQL Server}
+   TABLE1=esquema.tabla_sesiones
+   TABLE2=esquema.tabla_datos_sesion
+   TABLE3=esquema.tabla_voz_sesion
+   TABLE4=esquema.tabla_calidad_voz
+   EXTRACT_DATA_OUTPUT_DIR=C:/ruta/completa/al/directorio/de/salida
+   ```
+
+3. **Ejecutar extracciones**:
+   ```bash
+   # Extraer datos móviles
+   python extract_data_datos.py
+   
+   # Extraer datos de voz
+   python extract_data_voz.py
+   ```
+
+4. **Copiar archivos extraídos al pipeline ETL**:
+   ```bash
+   # Copiar archivos parquet al directorio del pipeline ETL
+   cp [EXTRACT_DATA_OUTPUT_DIR]/*.parquet /ruta/al/pipeline/app/data/
+   ```
+
+### 1. Clonar el Repositorio del Pipeline ETL
 
 ```bash
 git clone <repository-url>
@@ -370,7 +458,73 @@ docker-compose exec airflow-webserver airflow tasks logs superset_etl_pipeline [
 docker-compose logs postgres
 ```
 
+### Problemas Específicos del Flujo de Datos
+
+#### Archivos de extracción desactualizados
+
+```bash
+# Verificar fechas de los archivos parquet
+ls -la app/data/*.parquet
+
+# Si están desactualizados, ejecutar nuevamente el proceso de extracción
+cd samm_extract_data/
+python extract_data_datos.py
+python extract_data_voz.py
+```
+
+#### Inconsistencias entre extracción y ETL
+
+- Verificar que las fechas de extracción coincidan con el período esperado
+- Revisar los archivos de metadatos generados por el extractor:
+    - `extraction_datos_metadata.json`
+    - `extraction_voz_metadata.json`
+
+#### Coordinación de procesos
+
+- El proceso de extracción debe ejecutarse antes que el ETL
+- Verificar que los archivos estén completamente escritos antes de iniciar ETL
+- Considerar implementar verificaciones de integridad de archivos
+
 ## 📝 Configuración Adicional
+
+### Flujo Completo de Trabajo
+
+Para ejecutar el proceso completo de datos, seguir este orden:
+
+#### 1. Fase de Extracción (Usuario AD)
+
+```bash
+# En máquina con acceso AD
+cd samm_extract_data/
+python extract_data_datos.py    # Extrae datos móviles
+python extract_data_voz.py      # Extrae datos de voz
+```
+
+#### 2. Transferencia de Datos
+
+```bash
+# Copiar archivos al servidor del pipeline ETL
+scp extract_*.parquet usuario@servidor:/ruta/pipeline/app/data/
+# O usar el método de transferencia apropiado para tu entorno
+```
+
+#### 3. Fase de Procesamiento (Pipeline ETL)
+
+```bash
+# En servidor del pipeline
+cd sma_superset/
+docker-compose up -d
+# El DAG se ejecutará automáticamente según programación
+```
+
+### Automatización Recomendada
+
+Para automatizar el proceso completo, considerar:
+
+1. **Script de coordinación** que ejecute extracción → transferencia → ETL
+2. **Validaciones de integridad** entre etapas
+3. **Notificaciones** de estado de cada fase
+4. **Rollback automático** en caso de errores
 
 ### Variables de Entorno Requeridas
 
@@ -410,32 +564,87 @@ _AIRFLOW_WWW_USER_PASSWORD='tu_contraseña_admin'
 
 ### Preparación de Datos
 
-Antes de ejecutar el pipeline, asegúrate de tener los siguientes archivos en el directorio `app/data/`:
+#### Archivos Generados por el Extractor
 
-1. **Archivos Parquet de Datos Móviles**:
+Los siguientes archivos deben estar presentes en `app/data/` **antes** de ejecutar el pipeline ETL:
+
+1. **Archivos Parquet de Datos Móviles** (generados por `extract_data_datos.py`):
     - `extract_datos_table1.parquet`
     - `extract_datos_table2.parquet`
 
-2. **Archivos Parquet de Datos de Voz**:
+2. **Archivos Parquet de Datos de Voz** (generados por `extract_data_voz.py`):
     - `extract_voz_table1.parquet`
     - `extract_voz_table3.parquet`
     - `extract_voz_table4.parquet`
 
-3. **Archivo Excel de Dispositivos**:
+3. **Archivos de Metadatos** (generados automáticamente):
+    - `extraction_datos_metadata.json`
+    - `extraction_voz_metadata.json`
+
+#### Archivos Adicionales Requeridos
+
+4. **Archivo Excel de Dispositivos** (provisto manualmente):
     - `sense_nacional_v0.xlsx`
 
-4. **Archivos Geográficos**:
+5. **Archivos Geográficos** (provistos manualmente):
     - `states/shapefile.shp` (y archivos asociados .shx, .dbf, .prj)
+
+#### Validación de Archivos
+
+Antes de iniciar el ETL, ejecutar:
+
+```bash
+# Verificar presencia de archivos
+ls -la app/data/extract_*.parquet
+ls -la app/data/sense_nacional_v0.xlsx
+ls -la app/data/states/shapefile.*
+
+# Verificar tamaños (los archivos no deben estar vacíos)
+du -h app/data/extract_*.parquet
+```
 
 ## 🔄 Flujo de Ejecución
 
-El pipeline sigue una secuencia estricta:
+### Arquitectura de Dos Fases
 
-1. **Extracción y Procesamiento** → Carga y limpia datos fuente
-2. **Transformación** → Aplica reglas de negocio y cálculos
-3. **Mapeo Geográfico** → Asocia coordenadas con regiones
-4. **Creación de Vistas** → Genera vistas optimizadas para análisis
-5. **Validación** → Verifica integridad y calidad de datos
+#### Fase 1: Extracción (Usuario AD Requerido)
+
+1. **Prerequisitos**:
+    - Usuario con permisos de Active Directory
+    - Acceso a SQL Server con autenticación Windows
+    - Repositorio `samm_extract_data/` configurado
+
+2. **Proceso**:
+    - Extrae datos desde SQL Server (2025-01-01 hasta presente)
+    - Genera archivos Parquet optimizados
+    - Crea metadatos de extracción
+
+3. **Salida**:
+    - 5 archivos `.parquet` con datos limpios
+    - 2 archivos `.json` con metadatos
+
+#### Fase 2: Pipeline ETL (Dockerizado)
+
+1. **Entrada**:
+    - Archivos Parquet de la Fase 1
+    - Archivos geográficos y de dispositivos
+
+2. **Procesamiento Secuencial**:
+    - **Extracción y Procesamiento** → Carga y limpia datos fuente
+    - **Transformación** → Aplica reglas de negocio y cálculos
+    - **Mapeo Geográfico** → Asocia coordenadas con regiones
+    - **Creación de Vistas** → Genera vistas optimizadas para análisis
+    - **Validación** → Verifica integridad y calidad de datos
+
+3. **Salida**:
+    - Datos estructurados en PostgreSQL
+    - Vistas optimizadas para PowerBI
+
+### Programación y Scheduling
+
+- **Extracción**: Manual o programada vía cron/Task Scheduler
+- **ETL Pipeline**: Automático via Airflow (9:00 y 14:00 diariamente)
+- **Coordinación**: La extracción debe completarse antes del ETL
 
 ## 📊 Métricas y Monitoring
 
