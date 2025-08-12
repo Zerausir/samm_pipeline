@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import datetime
 from datetime import timedelta, datetime
-import ipaddress
+import gc
 from app.utils.postgres_handler import get_postgres_handler
 
 
@@ -71,45 +71,157 @@ def load_voice_data():
 
 
 def _process_table1_session_summary(df):
-    """Process SessionSummary table (table1) exactly like CODIGOS_UNIDOS.ipynb"""
+    """Process SessionSummary table (table1) with only required columns"""
     print("Processing SessionSummary data...")
 
+    # FILTER FIRST: Only keep Voice MO sessions to reduce data volume
+    initial_rows = len(df)
+    if 'SessionType' in df.columns:
+        df = df[df['SessionType'] == 'Voice MO'].copy()
+        filtered_rows = len(df)
+        print(
+            f"Filtered for Voice MO sessions: {initial_rows:,} → {filtered_rows:,} records (-{initial_rows - filtered_rows:,})")
+    else:
+        print("Warning: SessionType column not found, processing all records")
+
+    if df.empty:
+        print("Warning: No Voice MO sessions found after filtering!")
+        return df
+
+    # Define required columns
+    required_columns = [
+        'DatasourceId', 'SessionIdOrCallIndex', 'SessionType', 'StartTime', 'StartLatitude', 'StartLongitude',
+        'StartRadioTechnology', 'EndSessionNetworkIndex', 'EndTime', 'EndLatitude',
+        'EndLongitude', 'EndRadioTechnology', 'Operator', 'SimOperator', 'IMSI', 'IMEI',
+        'SessionEndStatus', 'ErrorCause', 'ErrorCauseDetails', 'RadioTechnologySequence', 'NoGps'
+    ]
+
+    # Filter to only required columns (keep only those that exist)
+    existing_columns = [col for col in required_columns if col in df.columns]
+    initial_columns = len(df.columns)
+    df = df[existing_columns].copy()
+    filtered_columns = len(df.columns)
+
+    print(f"Filtered columns for voice table1: {initial_columns} → {filtered_columns} columns")
+    print(f"   - Columns kept: {existing_columns}")
+
+    missing_columns = [col for col in required_columns if col not in existing_columns]
+    if missing_columns:
+        print(f"   - Missing columns: {missing_columns}")
+
+    # REMOVE DUPLICATES BEFORE DATA TYPE CONVERSION
+    duplicate_columns = [
+        'DatasourceId', 'SessionType', 'StartRadioTechnology', 'IMSI', 'IMEI',
+        'StartLatitude', 'StartLongitude', 'EndLatitude', 'EndLongitude',
+        'StartTime', 'EndTime', 'EndRadioTechnology', 'Operator', 'SimOperator'
+    ]
+
+    # Only use columns that exist in the dataframe
+    existing_duplicate_columns = [col for col in duplicate_columns if col in df.columns]
+
+    if existing_duplicate_columns:
+        before_dedup = len(df)
+        df = df.drop_duplicates(subset=existing_duplicate_columns, keep='first')
+        after_dedup = len(df)
+        duplicates_removed = before_dedup - after_dedup
+        print(
+            f"Removed duplicates from voice table1: {before_dedup:,} → {after_dedup:,} records (-{duplicates_removed:,} duplicates)")
+
+        if duplicates_removed > 0:
+            print(f"   - Duplicate detection based on columns: {existing_duplicate_columns}")
+    else:
+        print("Warning: No duplicate detection columns found in voice table1")
+
     # Convert datetime columns
-    df['StartTime'] = pd.to_datetime(df['StartTime'], errors='coerce', format='%Y-%m-%d %H:%M:%S.%f')
-    df['EndTime'] = pd.to_datetime(df['EndTime'], errors='coerce', format='%Y-%m-%d %H:%M:%S.%f')
+    datetime_columns = ['StartTime', 'EndTime']
+    for col in datetime_columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce', format='%Y-%m-%d %H:%M:%S.%f')
 
     # Convert coordinate columns to float
-    df['StartLatitude'] = df['StartLatitude'].astype(float)
-    df['StartLongitude'] = df['StartLongitude'].astype(float)
-    df['EndLatitude'] = df['EndLatitude'].astype(float)
-    df['EndLongitude'] = df['EndLongitude'].astype(float)
+    coordinate_columns = ['StartLatitude', 'StartLongitude', 'EndLatitude', 'EndLongitude']
+    for col in coordinate_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
-    # Convert ID columns to Int64
-    df['IMSI'] = pd.to_numeric(df['IMSI']).astype('Int64')
-    df['IMEI'] = pd.to_numeric(df['IMEI']).astype('Int64')
-    df['LogfileId'] = pd.to_numeric(df['LogfileId']).astype('Int64')
+    # Convert ID and numeric columns
+    id_columns = ['DatasourceId', 'IMSI', 'IMEI', 'EndSessionNetworkIndex']
+    for col in id_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
 
-    # Process IP addresses
-    def convertir_ip(ip):
-        try:
-            return ipaddress.ip_address(ip)
-        except:
-            return None
-
-    df['IpAddress'] = df['IpAddress'].apply(convertir_ip)
+    # Convert boolean columns
+    boolean_columns = ['NoGps']
+    for col in boolean_columns:
+        if col in df.columns:
+            df[col] = df[col].astype('boolean')
 
     return df
 
 
 def _process_table3_session_summary_voice(df):
-    """Process SessionSummaryVoice table (table3) exactly like CODIGOS_UNIDOS.ipynb"""
+    """Process SessionSummaryVoice table (table3) with only required columns"""
     print("Processing SessionSummaryVoice data...")
+
+    # Define required columns
+    required_columns = [
+        'DatasourceId', 'CallIndex', 'CallDirection', 'AqmCallType', 'StartRadioTechnology', 'EndRadioTechnology',
+        'DialStartDateTime', 'DialStartPhoneNumber', 'CallAttemptDateTime', 'CallAttemptRadioTechnology',
+        'CallAttemptCsfbDateTime', 'CallAttemptCsfRadioTechnology', 'CallEstablishedDateTime',
+        'CallEstablishedRadioTechnology', 'CallEstablishedDomain', 'DialEndDateTime', 'DialEndServiceStatus',
+        'CallInitiationDateTime', 'CallInitiationRadioTechnology', 'CallReestablishedDateTime', 'CallEndDateTime',
+        'CallEndRadioTechnology', 'CallEndCause', 'CallEndType', 'CallEndDomain', 'CallEndCallDuration',
+        'AqmSessionEndOtherPartyPhoneNumber', 'AqmSessionEndPhoneNumber', 'AqmSessionEndAqmCallQuality',
+        'AqmSessionEndAqmCallQualityDownlink', 'AqmSessionEndAqmCallQualityUplink', 'AqmAlgorithmDownlink',
+        'AqmAlgorithmUplink', 'SpeechCodecs', 'SpeechPathDelayOneWay', 'SilentCall',
+        'SpeechInterruptionTimeDownlinkDuration', 'RtpInterruptionTimeAudioInterruptionTime',
+        'HandoverSpeechInterruptionDownlinkDuration', 'CallSetupOffHookTime', 'CallAttemptAccessNetworkInfo',
+        'CallSetupAccessNetworkInfo', 'CallSetupDomain', 'CallSetupUserPerceivedCallSetupTime',
+        'CallEstablishedUserCallEstablishedTime', 'CallEstablishedCallAnswerDelay', 'BearerTechnology'
+    ]
+
+    # Filter to only required columns (keep only those that exist)
+    existing_columns = [col for col in required_columns if col in df.columns]
+    initial_columns = len(df.columns)
+    df = df[existing_columns].copy()
+    filtered_columns = len(df.columns)
+
+    print(f"Filtered columns for table3: {initial_columns} → {filtered_columns} columns")
+    print(f"   - Columns kept: {existing_columns}")
+
+    missing_columns = [col for col in required_columns if col not in existing_columns]
+    if missing_columns:
+        print(f"   - Missing columns: {missing_columns}")
+
+    # REMOVE DUPLICATES BEFORE DATA TYPE CONVERSION
+    duplicate_columns = [
+        'DatasourceId', 'StartRadioTechnology', 'EndRadioTechnology', 'DialStartDateTime',
+        'CallAttemptDateTime', 'CallAttemptRadioTechnology', 'CallEndDateTime',
+        'CallEndRadioTechnology', 'CallEndCause'
+    ]
+
+    # Only use columns that exist in the dataframe
+    existing_duplicate_columns = [col for col in duplicate_columns if col in df.columns]
+
+    if existing_duplicate_columns:
+        before_dedup = len(df)
+        df = df.drop_duplicates(subset=existing_duplicate_columns, keep='first')
+        after_dedup = len(df)
+        duplicates_removed = before_dedup - after_dedup
+        print(
+            f"Removed duplicates from voice table3: {before_dedup:,} → {after_dedup:,} records (-{duplicates_removed:,} duplicates)")
+
+        if duplicates_removed > 0:
+            print(f"   - Duplicate detection based on columns: {existing_duplicate_columns}")
+    else:
+        print("Warning: No duplicate detection columns found in voice table3")
 
     # Convert datetime columns
     datetime_columns = [
         'DialStartDateTime', 'CallAttemptCsfbDateTime', 'CallSetupDateTime',
         'CallSetupCsfbDateTime', 'CallEstablishedDateTime', 'DialEndDateTime',
-        'CallInitiationDateTime', 'CallEndDateTime', 'EutranReselectionTimeAfterCsfbCallDateTime'
+        'CallInitiationDateTime', 'CallEndDateTime', 'EutranReselectionTimeAfterCsfbCallDateTime',
+        'CallAttemptDateTime', 'CallBlockedDateTime', 'CallReestablishedDateTime'
     ]
     for col in datetime_columns:
         if col in df.columns:
@@ -130,23 +242,23 @@ def _process_table3_session_summary_voice(df):
         'CallSetupCsfbTime', 'CallSetupCsfbUserPerceivedTime', 'CallSetupCsfbServiceRequestTime',
         'CallEndCallDuration', 'EutranReselectionTimeAfterCsfbCallIdleToLteTime',
         'CallSetupOffHookTime', 'CallSetupUserPerceivedCallSetupTime',
-        'CallEstablishedUserCallEstablishedTime'
+        'CallEstablishedUserCallEstablishedTime', 'CallBlockedDuration', 'CallBlockedCsfbDuration'
     ]
     for col in duration_columns:
         if col in df.columns:
             df[col] = df[col].apply(convertir_a_duracion)
 
     # Convert float columns
-    df['AqmSessionEndAqmCallQuality'] = df['AqmSessionEndAqmCallQuality'].astype(float)
-    df['AqmSessionEndAqmCallQualityDownlink'] = df['AqmSessionEndAqmCallQualityDownlink'].astype(float)
+    float_columns = [
+        'AqmSessionEndAqmCallQuality', 'AqmSessionEndAqmCallQualityDownlink'
+    ]
+    for col in float_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
     # Convert ID columns to Int64
     id_columns = [
-        'DatasourceId', 'CallIndex', 'IncompleteCall', 'DialStartSampleId',
-        'DialStartPhoneNumber', 'CallAttemptRetrySampleId', 'CallAttemptSampleId',
-        'Csfb', 'Srvcc', 'CallAttemptCsfbSampleId', 'CallSetupSampleId',
-        'CallSetupCsfbSampleId', 'CallEstablishedSampleId', 'DialEndSampleId',
-        'CallInitiationSampleId', 'CallEndSampleId', 'EutranReselectionTimeAfterCsfbCallSampleId',
+        'DatasourceId', 'DialStartPhoneNumber', 'DialEndSampleId',
         'AqmSessionEndOtherPartyPhoneNumber', 'AqmSessionEndPhoneNumber'
     ]
     for col in id_columns:
@@ -157,25 +269,88 @@ def _process_table3_session_summary_voice(df):
 
 
 def _process_table4_voice_quality(df):
-    """Process SessionSummaryVoiceQuality table (table4) exactly like CODIGOS_UNIDOS.ipynb"""
-    print("Processing SessionSummaryVoiceQuality data...")
+    """Process SessionVoiceQuality table (table4) with only required columns and coordinate filtering"""
+    print("Processing SessionVoiceQuality data...")
+
+    # Define required columns
+    required_columns = [
+        'DatasourceId', 'CallIndex', 'SentenceIndex', 'StartDateTime', 'EndDateTime', 'EndLatitude', 'EndLongitude',
+        'AqmScoreAny', 'AqmScoreDownlink', 'AqmScoreUplink', 'SpeechCodec',
+        'AqmAlgorithmDownlink', 'AqmAlgorithmUplink'
+    ]
+
+    # Filter to only required columns (keep only those that exist)
+    existing_columns = [col for col in required_columns if col in df.columns]
+    initial_columns = len(df.columns)
+    df = df[existing_columns].copy()
+    filtered_columns = len(df.columns)
+
+    print(f"Filtered columns for table4: {initial_columns} → {filtered_columns} columns")
+    print(f"   - Columns kept: {existing_columns}")
+
+    missing_columns = [col for col in required_columns if col not in existing_columns]
+    if missing_columns:
+        print(f"   - Missing columns: {missing_columns}")
+
+    # FILTER OUT NULL COORDINATES BEFORE DUPLICATE REMOVAL
+    if 'EndLatitude' in df.columns and 'EndLongitude' in df.columns:
+        initial_rows = len(df)
+        df = df.dropna(subset=['EndLatitude', 'EndLongitude'])
+        filtered_rows = len(df)
+        print(
+            f"Filtered null coordinates: {initial_rows:,} → {filtered_rows:,} records (-{initial_rows - filtered_rows:,})")
+    else:
+        print("Warning: EndLatitude or EndLongitude columns not found - skipping coordinate filtering")
+
+    if df.empty:
+        print("Warning: No records remaining after coordinate filtering!")
+        return df
+
+    # REMOVE DUPLICATES BEFORE DATA TYPE CONVERSION
+    duplicate_columns = [
+        'DatasourceId', 'StartDateTime', 'EndDateTime', 'EndLatitude',
+        'EndLongitude', 'EndRadioTechnology'
+    ]
+
+    # Only use columns that exist in the dataframe
+    existing_duplicate_columns = [col for col in duplicate_columns if col in df.columns]
+
+    if existing_duplicate_columns:
+        before_dedup = len(df)
+        df = df.drop_duplicates(subset=existing_duplicate_columns, keep='first')
+        after_dedup = len(df)
+        duplicates_removed = before_dedup - after_dedup
+        print(
+            f"Removed duplicates from voice table4: {before_dedup:,} → {after_dedup:,} records (-{duplicates_removed:,} duplicates)")
+
+        if duplicates_removed > 0:
+            print(f"   - Duplicate detection based on columns: {existing_duplicate_columns}")
+    else:
+        print("Warning: No duplicate detection columns found in voice table4")
 
     # Convert ID columns to Int64
-    id_columns = ['DatasourceId', 'LastSampleId', 'CurrentCallIndex', 'RadioTechnology']
+    id_columns = ['DatasourceId']
     for col in id_columns:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
 
     # Convert datetime
-    if 'DateTime' in df.columns:
-        df['DateTime'] = pd.to_datetime(df['DateTime'], errors='coerce', format='%Y-%m-%d %H:%M:%S.%f')
+    datetime_columns = ['StartDateTime', 'EndDateTime']
+    for col in datetime_columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce', format='%Y-%m-%d %H:%M:%S.%f')
 
-    # Convert coordinate columns
-    df['Latitude'] = df['Latitude'].astype(float)
-    df['Longitude'] = df['Longitude'].astype(float)
+    # Convert coordinate columns to float
+    coordinate_columns = ['EndLatitude', 'EndLongitude']
+    for col in coordinate_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
-    # Convert specific AMR codec column mentioned in the notebook
-    df['AmrCodecUsageDownlink_AMR12.2'] = df['AmrCodecUsageDownlink_AMR12.2'].astype(float)
+    # Convert quality score columns to float
+    score_columns = ['AqmScoreAny', 'AqmScoreDownlink', 'AqmScoreUplink']
+    for col in score_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
     return df
 
@@ -191,96 +366,232 @@ def _process_sense_nacional(df):
     return df
 
 
-def process_voice_data(dataframes):
+def process_voice_data_chunked(dataframes, chunk_size=10000):
     """
-    Process and merge voice dataframes EXACTLY like CODIGOS_UNIDOS.ipynb
+    Process and merge voice dataframes starting with the largest table (df3)
+    Using chunks for the largest merge (df3 + df2)
     """
-    print("🚀 INICIANDO PROCESO DE MERGE COMPLETO")
+    print("🚀 INICIANDO PROCESO DE MERGE COMPLETO (CHUNKED) - ORDEN CORRECTO")
     print("=" * 70)
 
     # Extract individual dataframes
     df1 = dataframes['table1'].copy()  # cdr_SessionSummary
     df2 = dataframes['table3'].copy()  # cdr_SessionSummaryVoice
-    df3 = dataframes['table4'].copy()  # cdr_SessionSummaryVoiceQuality
+    df3 = dataframes['table4'].copy()  # cdr_SessionVoiceQuality (LA MÁS GRANDE)
     df4 = dataframes['sense_nacional'].copy()  # sense_nacional
+
+    # OPTIMIZACIÓN 1: LIBERAR MEMORIA INMEDIATAMENTE
+    del dataframes  # Liberar dataframes originales
+    gc.collect()
+    print("✅ Memoria de dataframes originales liberada")
 
     print(f"Table1 (SessionSummary) shape: {df1.shape}")
     print(f"Table3 (SessionSummaryVoice) shape: {df2.shape}")
-    print(f"Table4 (SessionSummaryVoiceQuality) shape: {df3.shape}")
+    print(f"Table4 (SessionVoiceQuality) shape: {df3.shape} (LA MÁS GRANDE)")
     print(f"sense_nacional shape: {df4.shape}")
+    print(f"Chunk size: {chunk_size:,}")
 
     try:
-        # 1. DATA PROCESSING - Apply transformations exactly like the notebook
+        # 1. DATA PROCESSING - Apply transformations
         print("\n📱 PASO 1: PROCESANDO DATOS...")
         df1 = _process_table1_session_summary(df1)
         df2 = _process_table3_session_summary_voice(df2)
         df3 = _process_table4_voice_quality(df3)
         df4 = _process_sense_nacional(df4)
 
-        # 2. MERGE PROCESS - Exactly like CODIGOS_UNIDOS.ipynb
-        print("\n📱 PASO 2: INCORPORANDO DATOS DE DISPOSITIVOS (df1 + df4)")
+        # OPTIMIZACIÓN 2: VALIDAR QUE TENEMOS DATOS PARA HACER MERGE
+        if df1.empty:
+            raise ValueError("❌ CRITICAL: Table1 (SessionSummary) is empty after processing")
+        if df2.empty:
+            raise ValueError("❌ CRITICAL: Table3 (SessionSummaryVoice) is empty after processing")
+        if df3.empty:
+            raise ValueError("❌ CRITICAL: Table4 (SessionVoiceQuality) is empty after processing")
+        if df4.empty:
+            raise ValueError("❌ CRITICAL: sense_nacional is empty after processing")
+
+        print("✅ Todas las tablas contienen datos después del procesamiento")
+
+        # 2. MERGE 1 EN CHUNKS: df3 (VoiceQuality) + df2 (SessionSummaryVoice)
+        print("\n📡 PASO 2: MERGE df3 + df2 EN CHUNKS (VoiceQuality + SessionSummaryVoice)")
         print("-" * 50)
+        print(f"Merging on: DatasourceId, CallIndex")
 
-        # Merge 1: df1 with df4 by (IMSI, IMEI)
-        df1_4_merged = df1.merge(df4, on=['IMSI', 'IMEI'], how='left', suffixes=('', '_df4'))
-        print(f"After merge df1+df4: {df1_4_merged.shape[0]} records")
+        processed_chunks = []
+        num_chunks = len(df3) // chunk_size + (1 if len(df3) % chunk_size > 0 else 0)
+        failed_chunks = 0
 
-        print("\n📞 PASO 3: INCORPORANDO DATOS DE VOZ (df1_4_merged + df2)")
+        print(f"Processing {len(df3):,} records in {num_chunks} chunks of {chunk_size:,}")
+
+        for i in range(0, len(df3), chunk_size):
+            chunk_end = min(i + chunk_size, len(df3))
+            chunk_num = i // chunk_size + 1
+
+            print(f"Processing chunk {chunk_num}/{num_chunks}: rows {i:,} to {chunk_end:,}")
+
+            # OPTIMIZACIÓN 3: MANEJO DE ERRORES EN CHUNKS
+            try:
+                # Get chunk from df3
+                chunk_df3 = df3.iloc[i:chunk_end].copy()
+
+                # Merge chunk with df2
+                chunk_merged = chunk_df3.merge(df2, on=['DatasourceId', 'CallIndex'], how='left', suffixes=('', '_df2'))
+
+                print(
+                    f"  Chunk {chunk_num}: df3 chunk ({len(chunk_df3)}) + df2 ({len(df2)}) = {len(chunk_merged)} records")
+
+                if len(chunk_merged) > 0:
+                    processed_chunks.append(chunk_merged)
+                else:
+                    print(f"⚠️  WARNING: Chunk {chunk_num} resulted in 0 records after merge")
+
+                # Clear chunk memory
+                del chunk_df3, chunk_merged
+                gc.collect()
+
+            except Exception as e:
+                failed_chunks += 1
+                print(f"❌ ERROR processing chunk {chunk_num}: {e}")
+
+                # Si fallan demasiados chunks, abortar
+                if failed_chunks > num_chunks * 0.1:  # Si falla más del 10% de chunks
+                    raise ValueError(f"❌ CRITICAL: Too many chunk failures ({failed_chunks}/{num_chunks}). Aborting.")
+
+                print(f"⚠️  Continuing with remaining chunks ({failed_chunks} failures so far)")
+                continue
+
+        # Combine all chunks from MERGE 1
+        print(f"\n🔄 COMBINANDO {len(processed_chunks)} CHUNKS DEL MERGE 1...")
+        if processed_chunks:
+            df3_2_merged = pd.concat(processed_chunks, ignore_index=True)
+            print(f"Combined dataset after MERGE 1: {len(df3_2_merged):,} records")
+
+            # OPTIMIZACIÓN 2: VALIDAR MERGE 1
+            if len(df3_2_merged) == 0:
+                raise ValueError("❌ MERGE 1 FAILED: No matching records between VoiceQuality and SessionSummaryVoice")
+
+            print("✅ MERGE 1 exitoso")
+        else:
+            raise ValueError("❌ MERGE 1 FAILED: No chunks were processed successfully!")
+
+        # Clear memory
+        del processed_chunks, df2, df3
+        gc.collect()
+
+        # 3. MERGE 2 NORMAL: Resultado + df1 (SessionSummary)
+        print("\n📞 PASO 3: MERGE RESULTADO + df1 (+ SessionSummary) - NORMAL")
         print("-" * 50)
+        print(f"Merging on: DatasourceId and CallIndex=SessionIdOrCallIndex")
 
-        # Merge 2: Result with df2 by DatasourceId
-        df1_4_2_merged = df1_4_merged.merge(df2, on='DatasourceId', how='left', suffixes=('', '_df2'))
-        print(f"After merge +df2: {df1_4_2_merged.shape[0]} records")
+        # Rename column for the merge to work properly
+        if 'SessionIdOrCallIndex' in df1.columns:
+            df1_renamed = df1.rename(columns={'SessionIdOrCallIndex': 'CallIndex'})
+            merge_columns = ['DatasourceId', 'CallIndex']
+        else:
+            print("Warning: SessionIdOrCallIndex not found in df1, using only DatasourceId")
+            df1_renamed = df1
+            merge_columns = ['DatasourceId']
 
-        print("\n📡 PASO 4: INCORPORANDO DATOS DE RED (df1_4_2_merged + df3)")
+        df3_2_1_merged = df3_2_merged.merge(df1_renamed, on=merge_columns, how='left', suffixes=('', '_df1'))
+        print(f"After MERGE 2: {len(df3_2_1_merged):,} records")
+
+        # OPTIMIZACIÓN 2: VALIDAR MERGE 2
+        if len(df3_2_1_merged) == 0:
+            raise ValueError("❌ MERGE 2 FAILED: No matching records with SessionSummary")
+
+        print("✅ MERGE 2 exitoso")
+
+        # Clear memory
+        del df3_2_merged, df1, df1_renamed
+        gc.collect()
+
+        # 4. MERGE 3 NORMAL: Resultado + df4 (sense_nacional)
+        print("\n📱 PASO 4: MERGE RESULTADO + df4 (+ sense_nacional) - NORMAL")
         print("-" * 50)
+        print(f"Merging on: IMSI, IMEI")
 
-        # Merge 3: Result with df3 by DatasourceId
-        dataset_final = df1_4_2_merged.merge(df3, on='DatasourceId', how='left', suffixes=('', '_df3'))
-        print(f"After merge +df3: {dataset_final.shape[0]} records")
+        dataset_final = df3_2_1_merged.merge(df4, on=['IMSI', 'IMEI'], how='left', suffixes=('', '_df4'))
+        print(f"After MERGE 3 (final): {len(dataset_final):,} records")
 
-        # Remove rows with NaN values in critical columns exactly like the notebook
+        # OPTIMIZACIÓN 2: VALIDAR MERGE 3 (FINAL)
+        if len(dataset_final) == 0:
+            raise ValueError("❌ MERGE 3 FAILED: Final dataset is empty")
+
+        print("✅ MERGE 3 exitoso")
+
+        # Remove rows with NaN values in critical coordinate columns
+        print("\n🧹 LIMPIEZA FINAL DE COORDENADAS...")
         initial_rows = len(dataset_final)
-        dataset_final = dataset_final.dropna(subset=['StartLatitude', 'StartLongitude', 'EndLatitude', 'EndLongitude'])
-        final_rows = len(dataset_final)
-        print(f"Filtrado de nulos: {initial_rows} → {final_rows} filas (-{initial_rows - final_rows})")
+
+        # Check which coordinate columns exist and filter accordingly
+        coordinate_columns_to_check = []
+        if 'StartLatitude' in dataset_final.columns and 'StartLongitude' in dataset_final.columns:
+            coordinate_columns_to_check.extend(['StartLatitude', 'StartLongitude'])
+        if 'EndLatitude' in dataset_final.columns and 'EndLongitude' in dataset_final.columns:
+            coordinate_columns_to_check.extend(['EndLatitude', 'EndLongitude'])
+
+        if coordinate_columns_to_check:
+            dataset_final = dataset_final.dropna(subset=coordinate_columns_to_check)
+            final_rows = len(dataset_final)
+            print(f"Filtered coordinates: {initial_rows:,} → {final_rows:,} records (-{initial_rows - final_rows:,})")
+
+            # VALIDAR QUE AÚN TENEMOS DATOS DESPUÉS DE FILTRAR COORDENADAS
+            if final_rows == 0:
+                raise ValueError("❌ CRITICAL: No records remaining after coordinate filtering!")
+        else:
+            final_rows = initial_rows
+            print(f"No coordinate filtering needed: {initial_rows:,} records")
+
+        # Clear final memory
+        del df3_2_1_merged, df4
+        gc.collect()
 
         print(f"\n🎯 RESUMEN FINAL DEL MERGE COMPLETO")
         print("=" * 70)
-        print(f"📊 Dataset inicial (df1): {len(df1):,} filas × {len(df1.columns)} columnas")
         print(f"📊 Dataset final: {len(dataset_final):,} filas × {len(dataset_final.columns)} columnas")
-        print(f"📈 Incremento de filas: +{len(dataset_final) - len(df1):,}")
-        print(f"📈 Incremento de columnas: +{len(dataset_final.columns) - len(df1.columns)}")
 
         # Data quality summary
-        dispositivos_enriquecidos = dataset_final['Device'].notna().sum()
-        columnas_df2 = [col for col in df2.columns if col != 'DatasourceId']
-        columnas_df3 = [col for col in df3.columns if col != 'DatasourceId']
-        voz_enriquecida = dataset_final[columnas_df2].notna().any(axis=1).sum()
-        red_enriquecida = dataset_final[columnas_df3].notna().any(axis=1).sum()
-
         print(f"\n📋 ENRIQUECIMIENTO DE DATOS:")
-        print(
-            f"   📱 Registros con datos de dispositivo: {dispositivos_enriquecidos:,} ({(dispositivos_enriquecidos / len(dataset_final) * 100):.1f}%)")
-        print(
-            f"   📞 Registros con datos de voz: {voz_enriquecida:,} ({(voz_enriquecida / len(dataset_final) * 100):.1f}%)")
-        print(
-            f"   📡 Registros con datos de red: {red_enriquecida:,} ({(red_enriquecida / len(dataset_final) * 100):.1f}%)")
+
+        # Check device enrichment from sense_nacional
+        if 'Device' in dataset_final.columns:
+            dispositivos_enriquecidos = dataset_final['Device'].notna().sum()
+            print(
+                f"   📱 Registros con datos de dispositivo: {dispositivos_enriquecidos:,} ({(dispositivos_enriquecidos / len(dataset_final) * 100):.1f}%)")
+
+        # Check session summary enrichment
+        session_cols = [col for col in dataset_final.columns if col.endswith('_df1')]
+        if session_cols:
+            session_enriched = dataset_final[session_cols].notna().any(axis=1).sum()
+            print(
+                f"   📞 Registros enriquecidos con datos de sesión: {session_enriched:,} ({(session_enriched / len(dataset_final) * 100):.1f}%)")
+
+        # Check voice summary enrichment
+        voice_cols = [col for col in dataset_final.columns if col.endswith('_df2')]
+        if voice_cols:
+            voice_enriched = dataset_final[voice_cols].notna().any(axis=1).sum()
+            print(
+                f"   🎙️  Registros enriquecidos con datos de voz: {voice_enriched:,} ({(voice_enriched / len(dataset_final) * 100):.1f}%)")
 
         print(f"\n🚀 EL MERGE SE COMPLETÓ EXITOSAMENTE")
+        print("📈 ESTRATEGIA DE CHUNKS APLICADA AL MERGE MÁS GRANDE (df3+df2)")
+        print("✅ OPTIMIZACIONES IMPLEMENTADAS:")
+        print("   - Gestión de memoria mejorada")
+        print("   - Validación de integridad en cada merge")
+        print("   - Manejo de errores robusto en chunks")
         print("=" * 70)
 
         return dataset_final
 
     except Exception as e:
-        print(f"Error in process_voice_data: {e}")
+        print(f"❌ Error in process_voice_data_chunked: {e}")
+        # Asegurar limpieza de memoria antes de abortar
+        gc.collect()
         raise
 
 
 def validate_voice_data(df):
     """
-    Validate processed voice data before storage
-    Enhanced validation to match the final dataset structure
+    Validate processed voice data before storage (optimized for large datasets)
     """
     print("Validating voice data...")
 
@@ -303,79 +614,24 @@ def validate_voice_data(df):
     if df['DatasourceId'].isnull().all():
         raise ValueError("All DatasourceId values are null")
 
-    # Check IMEI if present
-    if 'IMEI' in df.columns:
-        non_null_imei = df['IMEI'].notna().sum()
-        print(f"Valid IMEI records: {non_null_imei}/{len(df)} ({(non_null_imei / len(df) * 100):.1f}%)")
-
-    # 3. DATETIME VALIDATION
-    print("Validating datetime fields...")
-    datetime_columns = [col for col in df.columns if
-                        'DateTime' in col or 'Time' in col and df[col].dtype == 'datetime64[ns]']
-
-    for col in datetime_columns:
-        if col in df.columns:
-            valid_dates = df[col].notna().sum()
-            if valid_dates > 0:
-                try:
-                    datetime_series = pd.to_datetime(df[col], errors='coerce')
-                    valid_datetime_series = datetime_series.dropna()
-                    if len(valid_datetime_series) > 0:
-                        date_range = f"{valid_datetime_series.min()} to {valid_datetime_series.max()}"
-                        print(f"Column {col}: {len(valid_datetime_series)} valid dates, range: {date_range}")
-                except Exception as e:
-                    print(f"Column {col}: Error validating dates - {e}")
-
-    # 4. COORDINATE VALIDATION
+    # 3. COORDINATE VALIDATION (simplified)
     print("Validating coordinates...")
     coordinate_pairs = [
         ('StartLatitude', 'StartLongitude'),
         ('EndLatitude', 'EndLongitude'),
-        ('Latitude', 'Longitude')
+        ('EndLatitude_df3', 'EndLongitude_df3')
     ]
 
     for lat_col, lon_col in coordinate_pairs:
         if lat_col in df.columns and lon_col in df.columns:
             try:
-                lat_numeric = pd.to_numeric(df[lat_col], errors='coerce')
-                lon_numeric = pd.to_numeric(df[lon_col], errors='coerce')
-
-                valid_coords = ((lat_numeric.between(-90, 90)) &
-                                (lon_numeric.between(-180, 180))).sum()
+                valid_coords = ((df[lat_col].between(-90, 90)) &
+                                (df[lon_col].between(-180, 180))).sum()
                 total_coords = df[[lat_col, lon_col]].notna().all(axis=1).sum()
                 if total_coords > 0:
                     print(f"Valid coordinate pairs ({lat_col}, {lon_col}): {valid_coords}/{total_coords}")
             except Exception as e:
                 print(f"Error validating coordinates ({lat_col}, {lon_col}): {e}")
-
-    # 5. VOICE CALL SPECIFIC VALIDATION
-    print("Validating voice call specifics...")
-
-    # Check call directions if present
-    if 'CallDirection' in df.columns:
-        try:
-            call_directions = df['CallDirection'].value_counts()
-            print(f"Call directions: {dict(call_directions)}")
-        except Exception as e:
-            print(f"Error analyzing call directions: {e}")
-
-    # 6. DATA COMPLETENESS ANALYSIS
-    print("Analyzing data completeness...")
-    try:
-        # Calculate completeness per column
-        completeness = ((df.notna().sum() / len(df)) * 100).round(1)
-
-        # Report columns with high completeness
-        high_completeness = completeness[completeness >= 90]
-        print(f"Columns with ≥90% completeness: {len(high_completeness)}")
-
-        # Report overall completeness
-        total_complete_records = df.notna().any(axis=1).sum()
-        print(f"Records with any data: {total_complete_records}")
-        print(f"Overall data completeness: {(df.notna().sum().sum() / (len(df) * len(df.columns)) * 100):.1f}%")
-
-    except Exception as e:
-        print(f"Error analyzing data completeness: {e}")
 
     print("Voice data validation completed successfully!")
     return True
@@ -407,8 +663,8 @@ def main():
             print("Error: No se pudieron cargar los datos de voz")
             return
 
-        # Process voice data - EXACTLY like CODIGOS_UNIDOS.ipynb
-        processed_voice_data = process_voice_data(dataframes)
+        # Process voice data in chunks to manage memory
+        processed_voice_data = process_voice_data_chunked(dataframes, chunk_size=8000)
 
         # Validate processed data
         validate_voice_data(processed_voice_data)
