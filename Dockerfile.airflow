@@ -17,6 +17,7 @@ USER airflow
 
 # Instalar dependencias de Python
 RUN pip install --no-cache-dir \
+    "marshmallow>=3.13.0,<4.0.0" \
     psycopg2-binary \
     geopandas \
     pyodbc \

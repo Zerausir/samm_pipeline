@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arquitectura de la Aplicación (con PowerBI)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f8f9fa;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 1400px;
+            margin: 0 auto;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header {
+            width: 100%;
+            background-color: #0d6efd;
+            color: white;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .header h2 {
+            margin: 0;
+            font-size: 22px;
+            font-weight: bold;
+        }
+
+        .diagram-container {
+            position: relative;
+            width: 100%;
+            height: 750px;
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        rect.component {
+            rx: 8px;
+        }
+
+        .docker-container {
+            fill: none;
+            stroke: #2496ED;
+            stroke-width: 3;
+            stroke-dasharray: 10, 5;
+            rx: 12px;
+        }
+
+        .icon-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .tooltip {
+            background-color: black;
+            color: white;
+            font-size: 12px;
+            padding: 12px;
+            border-radius: 4px;
+            opacity: 0.9;
+            max-width: 300px;
+            z-index: 100;
+        }
+
+        .controls {
+            width: 100%;
+            background-color: #e9ecef;
+            padding: 16px;
+        }
+
+        .button-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .step-button {
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            border: none;
+            background-color: #dee2e6;
+            transition: background-color 0.3s;
+        }
+
+        .step-button.active {
+            background-color: #0d6efd;
+            color: white;
+        }
+
+        .description {
+            padding: 16px;
+            background-color: #fff3cd;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .description p {
+            margin: 8px 0;
+            font-size: 14px;
+        }
+
+        .description p:first-child {
+            font-weight: bold;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; r: 4px; }
+            50% { opacity: 0.6; r: 6px; }
+            100% { opacity: 1; r: 4px; }
+        }
+
+        .pulse-circle {
+            animation: pulse 1s infinite;
+        }
+
+        .data-detail {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 10;
+            width: 320px;
+            display: none;
+            max-height: 500px;
+            overflow-y: auto;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+        }
+
+        .logo-mini {
+            width: 20px;
+            height: 20px;
+            position: absolute;
+            bottom: -10px;
+            right: -10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2 id="title">Arquitectura de la Aplicación (con PowerBI) - 1. Extracción de SAMM Server</h2>
+        </div>
+
+        <div class="diagram-container">
+            <svg viewBox="0 0 1100 700" id="diagram"></svg>
+            <div id="dataProcessorDetail" class="data-detail"></div>
+        </div>
+
+        <div class="controls">
+            <div class="button-container" id="buttons"></div>
+        </div>
+
+        <div class="description">
+            <p>Descripción del paso actual:</p>
+            <p id="description">Script Python en PC Local se conecta a SAMM Server usando Windows Authentication, extrae datos de telemetría móvil y los envía al Data Processor dentro de Docker.</p>
+        </div>
+    </div>
+
+    <script>
+        // Definición de componentes y sus posiciones
+        const components = [
+            // Componentes dentro de Docker
+            { id: 'airflow-init', name: 'Airflow Init', x: 280, y: 100, color: '#0d9ddb', icon: 'cog', logo: 'airflow_logo.png', desc: 'Inicializa y configura el ambiente de Airflow dentro de Docker, creando tablas en PostgreSQL para metadata de DAGs.', inDocker: true },
+            { id: 'airflow-scheduler', name: 'Airflow Scheduler', x: 280, y: 210, color: '#0d9ddb', icon: 'clock', logo: 'airflow_logo.png', desc: 'Programa y ejecuta DAGs (9:00 y 14:00 diariamente) y monitorea su ejecución dentro de Docker.', inDocker: true },
+            { id: 'airflow-webserver', name: 'Airflow Webserver', x: 280, y: 320, color: '#0d9ddb', icon: 'server', logo: 'airflow_logo.png', desc: 'Interfaz web para monitorear y administrar workflows, ejecutándose en Docker en el puerto 8080.', inDocker: true },
+            { id: 'data-processor', name: 'Data Processor', x: 480, y: 210, color: '#4CAF50', icon: 'etl', logo: 'python_logo.png', desc: 'Procesa datos (SQL Server, GeoJSON), transforma (pandas, geopandas) y carga en PostgreSQL. Ejecuta dentro del contenedor Docker.', inDocker: true },
+            { id: 'geojson', name: 'GeoJSON', x: 480, y: 330, color: '#F7DF1E', icon: 'file', logo: 'geojson_logo.png', desc: 'Archivos Shapefile con información geográfica de regiones. Montados como volumen dentro de Docker.', inDocker: true },
+
+            // Componentes fuera de Docker
+            { id: 'powerbi', name: 'Power BI', x: 850, y: 160, color: '#F2C811', icon: 'chart', logo: 'powerbi_logo.png', desc: 'Plataforma de análisis y visualización de datos de Microsoft. Consume las vistas optimizadas desde PostgreSQL para crear dashboards interactivos.', inDocker: false },
+            { id: 'postgres', name: 'PostgreSQL', x: 850, y: 280, color: '#336791', icon: 'database', logo: 'postgresql_logo.png', desc: 'Base de datos principal para Airflow y datos de la aplicación. Aunque está en Docker, es accesible desde el host. Almacena los resultados procesados del ETL.', inDocker: false },
+            { id: 'pc-local', name: 'PC Local', x: 360, y: 530, color: '#5C2D91', icon: 'pc', logo: 'windows_logo.png', desc: 'Script Python ejecutándose en Windows para extraer datos de SAMM Server usando Windows Authentication.', inDocker: false },
+            { id: 'mssql', name: 'SAMM Server', x: 120, y: 530, color: '#CC2927', icon: 'database', logo: 'sqlserver_logo.png', desc: 'Fuente de datos de telemetría móvil (ubicación, rendimiento de red). Requiere Windows Authentication.', inDocker: false },
+        ];
+
+        // Íconos SVG
+        const icons = {
+            'database': '<path fill="white" d="M25,5 C25,2.5 19,0 12,0 S-1,2.5 -1,5 V25 C-1,27.5 5,30 12,30 S25,27.5 25,25 V5 M25,15 C25,17.5 19,20 12,20 S-1,17.5 -1,15 M25,10 C25,12.5 19,15 12,15 S-1,12.5 -1,10"/>',
+            'cog': '<path fill="white" d="M15,0 L17,6 L23,6 L18,10 L20,16 L15,12 L10,16 L12,10 L7,6 L13,6 Z M15,9 C16.7,9 18,10.3 18,12 C18,13.7 16.7,15 15,15 C13.3,15 12,13.7 12,12 C12,10.3 13.3,9 15,9 Z"/>',
+            'clock': '<circle fill="white" cx="15" cy="15" r="13" stroke="white" stroke-width="2"/><path fill="none" stroke="white" stroke-width="2" d="M15,8 V15 L20,18"/>',
+            'server': '<rect fill="white" x="5" y="6" width="20" height="6" rx="1"/><rect fill="white" x="5" y="14" width="20" height="6" rx="1"/><rect fill="white" x="5" y="22" width="20" height="6" rx="1"/><circle fill="black" cx="9" cy="9" r="1"/><circle fill="black" cx="9" cy="17" r="1"/><circle fill="black" cx="9" cy="25" r="1"/>',
+            'etl': '<path fill="white" d="M2,8 L8,2 L14,8 L10,8 L10,14 L6,14 L6,8 Z M18,8 L24,14 L18,20 L18,16 L12,16 L12,12 L18,12 Z M2,18 L8,24 L14,18 L10,18 L10,12 L6,12 L6,18 Z"/>',
+            'file': '<path fill="white" d="M6,0 L6,30 L24,30 L24,8 L16,0 Z M16,0 L16,8 L24,8"/>',
+            'chart': '<path fill="white" d="M2,28 L2,2 M2,28 L28,28 M8,22 L8,28 M14,16 L14,28 M20,12 L20,28 M26,6 L26,28"/>',
+            'pc': '<rect fill="white" x="3" y="5" width="24" height="16" rx="2"/><rect fill="white" x="10" y="22" width="10" height="1"/><rect fill="white" x="6" y="24" width="18" height="2" rx="1"/>',
+            'docker': '<path fill="#2496ED" d="M3,10 h4 v4 h-4z M8,10 h4 v4 h-4z M13,10 h4 v4 h-4z M3,5 h4 v4 h-4z M8,5 h4 v4 h-4z M13,5 h4 v4 h-4z M8,0 h4 v4 h-4z M18,8 h4 v4 h-4z M22,10 c3,0 5,2 5,4 c0,-2 1,-3 2,-3 c-1,-3 -4,-4 -7,-1z"/>'
+        };
+
+        // URLs de logos - usando los originales que funcionan
+        const logoUrls = {
+            // Logos originales de Airflow, PostgreSQL y SQL Server
+            'airflow_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/AirflowLogo.png/1200px-AirflowLogo.png',
+            'postgresql_logo.png': 'https://www.postgresql.org/media/img/about/press/elephant.png',
+            'sqlserver_logo.png': 'https://cdn-icons-png.flaticon.com/512/5968/5968364.png',
+
+            // Otros logos que funcionan bien
+            'python_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Python-logo-notext.svg/1869px-Python-logo-notext.svg.png',
+            'geojson_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/f3/Emblem-earth.svg/1024px-Emblem-earth.svg.png',
+            'docker_logo.png': 'https://www.docker.com/wp-content/uploads/2022/03/Moby-logo.png',
+
+            // Logos mejorados para PowerBI y Windows
+            'powerbi_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/cf/New_Power_BI_Logo.svg/630px-New_Power_BI_Logo.svg.png',
+            'windows_logo.png': 'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5f/Windows_logo_-_2012.svg/2048px-Windows_logo_-_2012.svg.png'
+        };
+
+        // Definición de conexiones posibles
+        const allConnections = [
+            'postgres-airflow-init', 'postgres-airflow-scheduler', 'postgres-airflow-webserver',
+            'airflow-scheduler-data-processor', 'data-processor-postgres',
+            'mssql-pc-local', 'pc-local-data-processor',
+            'geojson-data-processor', 'postgres-powerbi'
+        ];
+
+        // Definición de flujos por paso (orden correcto del proceso)
+        const flows = [
+            // 1. Extracción desde SAMM Server (PRIMERO)
+            [
+                { from: 'mssql', to: 'pc-local', active: true, label: 'Win Auth + Query' },
+                { from: 'pc-local', to: 'data-processor', active: true, label: 'Enviar datos CSV/Parquet' }
+            ],
+            // 2. Inicialización
+            [
+                { from: 'postgres', to: 'airflow-init', active: true, label: 'Crear tablas metadata' }
+            ],
+            // 3. Programación
+            [
+                { from: 'postgres', to: 'airflow-scheduler', active: true, label: 'Leer DAGs' },
+                { from: 'airflow-scheduler', to: 'data-processor', active: true, label: 'Trigger DAG' }
+            ],
+            // 4. Procesamiento ETL
+            [
+                { from: 'geojson', to: 'data-processor', active: true, label: 'Leer Shapefiles' },
+                { from: 'data-processor', to: 'postgres', active: true, label: 'Cargar datos transformados' }
+            ],
+            // 5. Visualización en PowerBI
+            [
+                { from: 'postgres', to: 'powerbi', active: true, label: 'Consultar vistas' }
+            ],
+            // 6. Monitoreo
+            [
+                { from: 'airflow-webserver', to: 'postgres', active: true, label: 'Leer estado DAGs' }
+            ]
+        ];
+
+        const flowLabels = [
+            '1. Extracción de SAMM Server',
+            '2. Inicialización del Sistema',
+            '3. Programación de DAGs',
+            '4. Procesamiento ETL',
+            '5. Visualización en PowerBI',
+            '6. Monitoreo de Workflows'
+        ];
+
+        const descriptions = [
+            'Script Python en PC Local se conecta a SAMM Server usando Windows Authentication, extrae datos de telemetría móvil y los envía al Data Processor dentro de Docker.',
+            'Airflow Init inicializa el sistema dentro de Docker, configurando la base de datos PostgreSQL con las tablas necesarias para gestionar metadata de DAGs.',
+            'Airflow Scheduler programa la ejecución de DAGs (9:00 y 14:00 diariamente) y dispara el proceso de ETL en el Data Processor.',
+            'Data Processor en Docker procesa los datos de SAMM Server y GeoJSON (transformaciones con pandas y geopandas), luego carga los resultados en PostgreSQL creando vistas optimizadas.',
+            'Power BI se conecta directamente a PostgreSQL para consumir las vistas optimizadas y crear dashboards interactivos de análisis y visualización.',
+            'Airflow Webserver proporciona una interfaz web (puerto 8080) para monitorear el estado de los workflows y administrar los DAGs.'
+        ];
+
+        // Pasos detallados del Data Processor
+        const dataProcessorSteps = [
+            {
+                title: '1. Conexión a PostgreSQL',
+                content: 'Establece conexión segura con PostgreSQL usando SQLAlchemy. Recibe datos CSV/Parquet desde PC Local.'
+            },
+            {
+                title: '2. Extracción de Datos',
+                content: 'Lee datos de telemetría móvil enviados desde el script local y archivos GeoJSON con información geográfica.'
+            },
+            {
+                title: '3. Transformación',
+                content: 'Limpia, normaliza y enriquece datos usando pandas y geopandas. Realiza joins espaciales entre datos de telemetría y regiones geográficas.'
+            },
+            {
+                title: '4. Carga en PostgreSQL',
+                content: 'Inserta/actualiza datos transformados en tablas PostgreSQL. Crea vistas optimizadas para consumo de PowerBI.'
+            },
+            {
+                title: '5. Validación',
+                content: 'Verifica integridad de datos cargados y registra estadísticas del proceso en logs de Airflow.'
+            }
+        ];
+
+        let activeFlow = 0;
+        let activeInterval = null;
+
+        // Función para obtener líneas de conexión
+        function getLine(from, to, active) {
+            const fromComp = components.find(c => c.id === from);
+            const toComp = components.find(c => c.id === to);
+            if (!fromComp || !toComp) return null;
+
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute("x1", fromComp.x + 30);
+            line.setAttribute("y1", fromComp.y + 30);
+            line.setAttribute("x2", toComp.x + 30);
+            line.setAttribute("y2", toComp.y + 30);
+            line.setAttribute("stroke", active ? "#28a745" : "#ccc");
+            line.setAttribute("stroke-width", active ? "3" : "1.5");
+            line.setAttribute("opacity", active ? "1" : "0.3");
+
+            if (active) {
+                line.setAttribute("marker-end", "url(#arrowhead)");
+                const animCircle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+                animCircle.setAttribute("r", "4");
+                animCircle.setAttribute("fill", "#28a745");
+                animCircle.setAttribute("class", "pulse-circle");
+                const animateMotion = document.createElementNS("http://www.w3.org/2000/svg", "animateMotion");
+                animateMotion.setAttribute("dur", "2s");
+                animateMotion.setAttribute("repeatCount", "indefinite");
+                animateMotion.setAttribute("path", `M${fromComp.x + 30},${fromComp.y + 30} L${toComp.x + 30},${toComp.y + 30}`);
+                animCircle.appendChild(animateMotion);
+                line.parentNode?.appendChild(animCircle);
+            }
+
+            return line;
+        }
+
+        // Función para mostrar detalles del Data Processor
+        function showDataProcessorDetails() {
+            const detailElement = document.getElementById('dataProcessorDetail');
+            if (activeFlow === 3) { // Paso 4: Procesamiento ETL
+                const dataProcessorComp = components.find(c => c.id === 'data-processor');
+                if (!dataProcessorComp) return;
+
+                let html = '<h4 style="margin-top: 0; color: #4CAF50;">Etapas del Data Processor:</h4>';
+                dataProcessorSteps.forEach((step, index) => {
+                    html += `<div style="margin-bottom: 12px; background-color: rgba(76, 175, 80, 0.1); padding: 8px; border-radius: 4px;">
+                        <div style="font-weight: bold; margin-bottom: 4px;">${step.title}</div>
+                        <div style="font-size: 11px;">${step.content}</div>
+                    </div>`;
+                });
+
+                detailElement.innerHTML = html;
+                detailElement.style.display = 'block';
+                detailElement.style.top = `${dataProcessorComp.y - 20}px`;
+                detailElement.style.left = `${dataProcessorComp.x + 80}px`;
+            } else {
+                detailElement.style.display = 'none';
+            }
+        }
+
+        // Función para renderizar el diagrama
+        function renderDiagram() {
+            const svg = document.getElementById("diagram");
+            svg.innerHTML = "";
+
+            // Agregar definición de flecha
+            const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+            const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+            marker.setAttribute("id", "arrowhead");
+            marker.setAttribute("markerWidth", "10");
+            marker.setAttribute("markerHeight", "10");
+            marker.setAttribute("refX", "8");
+            marker.setAttribute("refY", "3");
+            marker.setAttribute("orient", "auto");
+            const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+            polygon.setAttribute("points", "0 0, 10 3, 0 6");
+            polygon.setAttribute("fill", "#28a745");
+            marker.appendChild(polygon);
+            defs.appendChild(marker);
+            svg.appendChild(defs);
+
+            // Dibujar contenedor Docker más grande para incluir GeoJSON
+            const dockerRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+            dockerRect.setAttribute("x", "240");
+            dockerRect.setAttribute("y", "50");
+            dockerRect.setAttribute("width", "360");
+            dockerRect.setAttribute("height", "410");
+            dockerRect.setAttribute("class", "docker-container");
+            svg.appendChild(dockerRect);
+
+            // Logo de Docker
+            const dockerLogo = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            dockerLogo.innerHTML = icons['docker'];
+            dockerLogo.setAttribute("transform", "translate(550, 60) scale(1.5)");
+            svg.appendChild(dockerLogo);
+
+            // Etiqueta Docker
+            const dockerLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            dockerLabel.setAttribute("x", "255");
+            dockerLabel.setAttribute("y", "75");
+            dockerLabel.setAttribute("font-size", "16");
+            dockerLabel.setAttribute("fill", "#2496ED");
+            dockerLabel.setAttribute("font-weight", "bold");
+            dockerLabel.textContent = "Docker Container";
+            svg.appendChild(dockerLabel);
+
+            // Dibujar conexiones inactivas
+            allConnections.forEach(connection => {
+                const [from, to] = connection.split('-');
+                const isActive = flows[activeFlow].some(flow =>
+                    flow.from === from && flow.to === to && flow.active
+                );
+                if (!isActive) {
+                    const line = getLine(from, to, false);
+                    if (line) svg.appendChild(line);
+                }
+            });
+
+            // Dibujar conexiones activas
+            flows[activeFlow].forEach(flow => {
+                const line = getLine(flow.from, flow.to, flow.active);
+                if (line) svg.appendChild(line);
+            });
+
+            // Dibujar componentes
+            components.forEach(comp => {
+                const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+                g.id = comp.id;
+
+                const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                rect.setAttribute("x", comp.x);
+                rect.setAttribute("y", comp.y);
+                rect.setAttribute("width", 60);
+                rect.setAttribute("height", 60);
+                rect.setAttribute("rx", 8);
+                rect.setAttribute("fill", comp.color);
+                rect.setAttribute("opacity", flows[activeFlow].some(f => f.from === comp.id || f.to === comp.id) ? 1 : 0.6);
+                g.appendChild(rect);
+
+                const iconGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+                iconGroup.innerHTML = icons[comp.icon];
+                iconGroup.setAttribute("transform", `translate(${comp.x + 15}, ${comp.y + 15})`);
+                g.appendChild(iconGroup);
+
+                const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+                text.setAttribute("x", comp.x + 30);
+                text.setAttribute("y", comp.y + 80);
+                text.setAttribute("text-anchor", "middle");
+                text.setAttribute("font-size", 11);
+                text.setAttribute("fill", "#333");
+                text.setAttribute("font-weight", "bold");
+                text.textContent = comp.name;
+                g.appendChild(text);
+
+                // Tamaños de logos ajustados
+                const logoSizes = {
+                    'airflow_logo.png': 45,
+                    'python_logo.png': 28,
+                    'sqlserver_logo.png': 28,
+                    'powerbi_logo.png': 40,  // Aumentado ligeramente para mejor visibilidad
+                    'postgresql_logo.png': 24,
+                    'geojson_logo.png': 24,
+                    'windows_logo.png': 32  // Aumentado para mejor visibilidad
+                };
+
+                if (comp.logo && logoUrls[comp.logo]) {
+                    const logoImage = document.createElementNS("http://www.w3.org/2000/svg", "image");
+                    logoImage.setAttribute("href", logoUrls[comp.logo]);
+                    const logoSize = logoSizes[comp.logo] || 24;
+                    logoImage.setAttribute("x", comp.x + 60 - logoSize / 2);
+                    logoImage.setAttribute("y", comp.y + 60 - logoSize / 2);
+                    logoImage.setAttribute("width", logoSize);
+                    logoImage.setAttribute("height", logoSize);
+                    logoImage.setAttribute("style", "filter: drop-shadow(0px 0px 2px white);");
+                    g.appendChild(logoImage);
+                }
+
+                const tooltip = document.createElement('div');
+                tooltip.style.position = 'absolute';
+                tooltip.style.display = 'none';
+                tooltip.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+                tooltip.style.color = 'white';
+                tooltip.style.padding = '10px';
+                tooltip.style.borderRadius = '5px';
+                tooltip.style.zIndex = '100';
+                tooltip.style.fontSize = '12px';
+                tooltip.style.maxWidth = '280px';
+                document.body.appendChild(tooltip);
+
+                g.addEventListener('mouseover', (e) => {
+                    if (flows[activeFlow].some(f => f.from === comp.id || f.to === comp.id)) {
+                        tooltip.innerHTML = `<b>${comp.name}</b>: ${comp.desc}`;
+                        tooltip.style.display = 'block';
+                    }
+                    tooltip.style.left = (e.pageX + 10) + 'px';
+                    tooltip.style.top = (e.pageY + 10) + 'px';
+                });
+                g.addEventListener('mousemove', (e) => {
+                    if (tooltip.style.display === 'block') {
+                        tooltip.style.left = (e.pageX + 10) + 'px';
+                        tooltip.style.top = (e.pageY + 10) + 'px';
+                    }
+                });
+                g.addEventListener('mouseout', () => { tooltip.style.display = 'none'; });
+
+                svg.appendChild(g);
+            });
+
+            document.getElementById("title").textContent = `Arquitectura de la Aplicación (con PowerBI) - ${flowLabels[activeFlow]}`;
+            document.getElementById("description").textContent = descriptions[activeFlow];
+            showDataProcessorDetails();
+        }
+
+        // Función para inicializar los botones
+        function initButtons() {
+            const buttonContainer = document.getElementById("buttons");
+            buttonContainer.innerHTML = "";
+
+            flowLabels.forEach((label, idx) => {
+                const button = document.createElement("button");
+                button.className = `step-button ${idx === activeFlow ? "active" : ""}`;
+                button.textContent = idx + 1;
+                button.addEventListener("click", () => {
+                    setActiveFlow(idx);
+                });
+                buttonContainer.appendChild(button);
+            });
+        }
+
+        // Función para cambiar el flujo activo
+        function setActiveFlow(idx) {
+            activeFlow = idx;
+            renderDiagram();
+
+            document.querySelectorAll(".step-button").forEach((btn, i) => {
+                btn.className = `step-button ${i === activeFlow ? "active" : ""}`;
+            });
+
+            if (activeInterval) clearInterval(activeInterval);
+        }
+
+        // Función para iniciar intervalo automático
+        function startAutoInterval() {
+            activeInterval = setInterval(() => {
+                setActiveFlow((activeFlow + 1) % flowLabels.length);
+            }, 5000);
+        }
+
+        // Inicializar el diagrama
+        function init() {
+            renderDiagram();
+            initButtons();
+            // startAutoInterval(); // Descomentar para activar paso automático
+        }
+
+        document.addEventListener("DOMContentLoaded", init);
+    </script>
+</body>
+</html>
