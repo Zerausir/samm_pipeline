@@ -36,6 +36,11 @@ Dependencias (deben existir antes de ejecutar):
 
 Queries Grafana compatibles (PostgreSQL):
   Ver comentario al pie del archivo.
+
+Fix 2026-03-18:
+  JOIN datasource_phones ahora usa mm."IMEI"::bigint y vm."IMEI"::bigint
+  para resolver la incompatibilidad TEXT vs BIGINT entre las tablas raw
+  y datasource_phones.
 """
 
 import os
@@ -57,10 +62,10 @@ def get_env_var(var_name, default=None):
 
 def _get_connection_params() -> dict:
     return {
-        "host":     get_env_var("POSTGRES_HOST"),
-        "port":     get_env_var("POSTGRES_PORT"),
+        "host": get_env_var("POSTGRES_HOST"),
+        "port": get_env_var("POSTGRES_PORT"),
         "database": get_env_var("POSTGRES_DB"),
-        "user":     get_env_var("POSTGRES_USER"),
+        "user": get_env_var("POSTGRES_USER"),
         "password": get_env_var("POSTGRES_PASSWORD"),
     }
 
@@ -117,7 +122,7 @@ _VOICE_COLS = [
 ]
 
 
-def _get_available_cols(cur, table_name: str, wanted: list[str]):
+def _get_available_cols(cur, table_name: str, wanted: list):
     """Devuelve (disponibles, faltantes) comparando wanted con el schema real."""
     cur.execute(
         "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
@@ -125,20 +130,20 @@ def _get_available_cols(cur, table_name: str, wanted: list[str]):
     )
     existing = {row[0] for row in cur.fetchall()}
     available = [c for c in wanted if c in existing]
-    missing   = [c for c in wanted if c not in existing]
+    missing = [c for c in wanted if c not in existing]
     if missing:
         print(f"  ⚠️  Columnas no encontradas en {table_name}: {missing}")
         print("      Se seleccionarán como NULL en la vista.")
     return available, missing
 
 
-def _build_select(alias: str, available: list[str], missing: list[str]) -> str:
+def _build_select(alias: str, available: list, missing: list) -> str:
     """
     Construye la cláusula SELECT:
       - Columnas disponibles → alias."ColName"
       - Columnas faltantes   → NULL::TEXT AS "ColName"
     """
-    parts  = [f'{alias}."{c}"' for c in available]
+    parts = [f'{alias}."{c}"' for c in available]
     parts += [f'NULL::TEXT AS "{c}"' for c in missing]
     return ",\n    ".join(parts)
 
@@ -147,7 +152,7 @@ def _build_select(alias: str, available: list[str], missing: list[str]) -> str:
 # Verificación de dependencias
 # ---------------------------------------------------------------------------
 
-def _check_dependencies(cur) -> list[str]:
+def _check_dependencies(cur) -> list:
     missing = []
     tables_needed = [
         "mobile_raw_measurements",
@@ -201,7 +206,7 @@ def create_grafana_geo_views():
             cur.execute("DROP VIEW IF EXISTS grafana_mobile_geo_view;")
 
             avail_m, miss_m = _get_available_cols(cur, "mobile_raw_measurements", _MOBILE_COLS)
-            select_mobile   = _build_select("mm", avail_m, miss_m)
+            select_mobile = _build_select("mm", avail_m, miss_m)
 
             cur.execute(f"""
 CREATE VIEW grafana_mobile_geo_view AS
@@ -217,7 +222,7 @@ FROM mobile_raw_measurements mm
 LEFT JOIN location_mapping    lm ON mm.measurement_id = lm.measurement_id
 LEFT JOIN geographic_regions  gr ON lm.region_id = gr.region_id
                                  AND gr.is_current = 1
-LEFT JOIN datasource_phones   dp ON mm."IMEI" = dp."IMEI"
+LEFT JOIN datasource_phones   dp ON mm."IMEI"::bigint = dp."IMEI"
 WHERE mm.is_current = 1
   AND mm."SessionType" IN ('HTTP Post', 'HTTP Download');
 """)
@@ -235,8 +240,9 @@ WHERE mm.is_current = 1
             )
             geo_m = cur.fetchone()[0]
             print(f"     Total registros          : {total_m:,}")
-            print(f"     Con PhoneNumber resuelto : {phone_m:,} ({phone_m/total_m*100:.1f}%)" if total_m else "")
-            print(f"     Con Provincia mapeada    : {geo_m:,} ({geo_m/total_m*100:.1f}%)"    if total_m else "")
+            if total_m:
+                print(f"     Con PhoneNumber resuelto : {phone_m:,} ({phone_m / total_m * 100:.1f}%)")
+                print(f"     Con Provincia mapeada    : {geo_m:,} ({geo_m / total_m * 100:.1f}%)")
 
             # ================================================================
             # VISTA 2: grafana_voice_geo_view
@@ -247,7 +253,7 @@ WHERE mm.is_current = 1
             cur.execute("DROP VIEW IF EXISTS grafana_voice_geo_view;")
 
             avail_v, miss_v = _get_available_cols(cur, "voice_raw_measurements", _VOICE_COLS)
-            select_voice    = _build_select("vm", avail_v, miss_v)
+            select_voice = _build_select("vm", avail_v, miss_v)
 
             cur.execute(f"""
 CREATE VIEW grafana_voice_geo_view AS
@@ -263,7 +269,7 @@ FROM voice_raw_measurements   vm
 LEFT JOIN location_mapping    lm ON vm.measurement_id = lm.measurement_id
 LEFT JOIN geographic_regions  gr ON lm.region_id = gr.region_id
                                  AND gr.is_current = 1
-LEFT JOIN datasource_phones   dp ON vm."IMEI" = dp."IMEI"
+LEFT JOIN datasource_phones   dp ON vm."IMEI"::bigint = dp."IMEI"
 WHERE vm.is_current = 1
   AND vm."CallDirection" = 'MO';
 """)
@@ -281,8 +287,9 @@ WHERE vm.is_current = 1
             )
             geo_v = cur.fetchone()[0]
             print(f"     Total registros          : {total_v:,}")
-            print(f"     Con PhoneNumber resuelto : {phone_v:,} ({phone_v/total_v*100:.1f}%)" if total_v else "")
-            print(f"     Con Provincia mapeada    : {geo_v:,} ({geo_v/total_v*100:.1f}%)"    if total_v else "")
+            if total_v:
+                print(f"     Con PhoneNumber resuelto : {phone_v:,} ({phone_v / total_v * 100:.1f}%)")
+                print(f"     Con Provincia mapeada    : {geo_v:,} ({geo_v / total_v * 100:.1f}%)")
 
         conn.commit()
 
@@ -297,12 +304,11 @@ WHERE vm.is_current = 1
     print("\nVariables Grafana compatibles:")
     print('  $SimOperator  → columna "SimOperator"')
     print('  $PhoneNumber  → columna "PhoneNumber"')
-    print("  $__timeFrom() / $__timeTo() → \"StartTime\" / \"EndTime\"")
+    print('  $__timeFrom() / $__timeTo() → "StartTime" / "EndTime"')
 
 
 if __name__ == "__main__":
     create_grafana_geo_views()
-
 
 # =============================================================================
 # QUERIES GRAFANA — Adaptar en cada panel (PostgreSQL)
