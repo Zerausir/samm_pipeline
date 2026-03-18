@@ -1,673 +1,456 @@
-# Superset ETL Pipeline
+# sma_superset
 
-Un pipeline completo de ETL desarrollado con Apache Airflow para procesar datos móviles y de voz, con visualización en
-PowerBI.
+Pipeline ETL completo para procesamiento de datos de telecomunicaciones móviles y de voz, orquestado con Apache Airflow
+y almacenado en PostgreSQL para análisis en PowerBI.
 
-## 🏗️ Arquitectura del Sistema
+---
 
-Este proyecto implementa un sistema completo de procesamiento de datos de telecomunicaciones que consta de dos etapas
-principales:
+## Tabla de Contenidos
 
-### Flujo Completo de Datos
+- [Descripción](#descripción)
+- [Arquitectura](#arquitectura)
+- [Requisitos](#requisitos)
+- [Estructura del Proyecto](#estructura-del-proyecto)
+- [Configuración](#configuración)
+- [Instalación](#instalación)
+- [Pipeline ETL](#pipeline-etl)
+- [Base de Datos](#base-de-datos)
+- [Administración](#administración)
+- [Carga Histórica Inicial](#carga-histórica-inicial)
+- [Solución de Problemas](#solución-de-problemas)
+
+---
+
+## Descripción
+
+Este pipeline recibe archivos Parquet generados por [
+`samm_extract_data`](https://github.com/Zerausir/samm_extract_data), los procesa, los almacena en PostgreSQL y crea
+vistas optimizadas para su consumo en PowerBI. El sistema corre completamente dockerizado con Apache Airflow como
+orquestador.
+
+### Flujo completo de datos
 
 ```
-[SQL Server] → [Extractor AD] → [Archivos Parquet] → [ETL Pipeline] → [PostgreSQL] → [PowerBI]
-     ↓              ↓               ↓                    ↓              ↓            ↓
-  Datos Raw    Usuario AD     Datos Extraídos      Procesamiento    Vistas      Análisis
-                Requerido     (.parquet)           Dockerizado    Optimizadas   Final
+[SQL Server] ──► [samm_extract_data] ──► [Archivos Parquet]
+                    (máquina AD)
+                                               │
+                                               ▼
+                                        [sma_superset]
+                                               │
+                              ┌────────────────┼────────────────┐
+                              ▼                ▼                ▼
+                         Airflow DAG     PostgreSQL        PowerBI
+                         (orquesta)     (almacena)       (visualiza)
 ```
 
-### Componentes del Sistema
+---
 
-#### 1. **Extractor de Datos** (Prerequisito)
+## Arquitectura
 
-- **Ubicación**: Proceso separado ejecutado en usuario con Active Directory
-- **Función**: Extrae datos desde SQL Server usando autenticación Windows
-- **Salida**: Archivos Parquet listos para procesamiento
-- **Repositorio**: `samm_extract_data/` (proceso independiente)
+### Servicios Docker
 
-#### 2. **Pipeline ETL** (Este proyecto)
+| Servicio            | Imagen                 | Función                                |
+|---------------------|------------------------|----------------------------------------|
+| `postgres`          | `postgres:17-alpine`   | Base de datos principal                |
+| `airflow-webserver` | `custom-airflow:2.7.3` | UI de monitoreo (puerto 8080)          |
+| `airflow-scheduler` | `custom-airflow:2.7.3` | Orquestador del DAG                    |
+| `airflow-init`      | `custom-airflow:2.7.3` | Inicialización única del ambiente      |
+| `data-processor`    | `python:3.11`          | Contenedor auxiliar para procesamiento |
 
-- **Apache Airflow**: Orquestación y scheduling del pipeline
-- **PostgreSQL**: Base de datos principal para almacenamiento
-- **Python ETL**: Procesamiento de datos con pandas y geopandas
-- **PowerBI**: Visualización final de datos
+### DAG: `superset_etl_pipeline`
 
-### Dependencias entre Procesos
+El pipeline es **secuencial** — cada paso depende del anterior:
 
-⚠️ **IMPORTANTE**: El ETL Pipeline requiere que el proceso de extracción se haya ejecutado previamente y los archivos
-Parquet estén disponibles en `/app/data/`.
+```
+process_mobile_data
+        │
+        ▼
+process_voice_data
+        │
+        ▼
+update_all_mappings
+        │
+        ▼
+create_mobile_views
+        │
+        ▼
+create_voice_views
+        │
+        ▼
+pipeline_validation
+```
 
-## 📋 Requisitos del Sistema
+**Horario**: diariamente a las 09:00 y 14:00 (zona horaria `America/New_York`).
 
-### Software Requerido
+---
+
+## Requisitos
+
+### Software
 
 - Docker Desktop
 - Docker Compose
-- Python 3.11+
-- Al menos 8GB de RAM
-- 20GB de espacio en disco
+- Python 3.11+ (solo para el paso de extracción en máquina AD)
 
-### ⚠️ Prerequisitos Críticos
+### Hardware mínimo
 
-#### 1. Proceso de Extracción Completado
+- 8 GB de RAM para el host de Docker
+- 20 GB de espacio en disco
 
-Antes de ejecutar este pipeline ETL, debe haberse ejecutado el **proceso de extracción de datos** desde un usuario con
-permisos de Active Directory. Este proceso genera los archivos Parquet necesarios.
+> ⚠️ **Sin límites de memoria en contenedores**: los contenedores de Airflow usan toda la RAM disponible del host. Para
+> volúmenes de datos grandes (>6 meses de historia), ver [Carga Histórica Inicial](#carga-histórica-inicial).
 
-**Repositorio de Extracción**: `samm_extract_data/`
+---
 
-**Archivos Requeridos** (generados por el extractor):
+## Estructura del Proyecto
 
-- `extract_datos_table1.parquet` - Datos móviles tabla 1
-- `extract_datos_table2.parquet` - Datos móviles tabla 2
-- `extract_voz_table1.parquet` - Datos de voz tabla 1
-- `extract_voz_table3.parquet` - Datos de voz tabla 3
-- `extract_voz_table4.parquet` - Datos de voz tabla 4
-
-#### 2. Archivos Adicionales Requeridos
-
-El sistema también espera los siguientes archivos en `/app/data/`:
-
-- `sense_nacional_v0.xlsx` - Datos de dispositivos
-- `states/shapefile.shp` - Archivo geográfico (con archivos asociados .shx, .dbf, .prj)
-
-### Verificación de Archivos
-
-Antes de iniciar el pipeline, verificar que todos los archivos estén presentes:
-
-```bash
-ls -la app/data/
-# Debe mostrar:
-# extract_datos_table1.parquet
-# extract_datos_table2.parquet
-# extract_voz_table1.parquet
-# extract_voz_table3.parquet
-# extract_voz_table4.parquet
-# sense_nacional_v0.xlsx
-# states/shapefile.shp (y archivos asociados)
+```
+sma_superset/
+├── airflow/
+│   ├── dags/
+│   │   └── superset_etl_dag.py          # DAG principal con 6 pasos
+│   ├── logs/                            # Logs de ejecución (auto-generado)
+│   └── plugins/
+├── app/
+│   ├── data/                            # Archivos Parquet y estáticos (NO en git)
+│   │   ├── extract_datos_table1.parquet
+│   │   ├── extract_datos_table2.parquet
+│   │   ├── extract_voz_table1.parquet
+│   │   ├── extract_voz_table3.parquet
+│   │   ├── extract_voz_table4.parquet
+│   │   ├── sense_nacional_v0.xlsx
+│   │   └── states/                      # Shapefile de Ecuador
+│   │       ├── shapefile.shp
+│   │       ├── shapefile.shx
+│   │       ├── shapefile.dbf
+│   │       └── shapefile.prj
+│   ├── data_to_server/
+│   │   ├── main.py                      # ETL datos móviles
+│   │   ├── main_voice.py                # ETL datos de voz
+│   │   ├── update_mapping.py            # Mapeo espacial
+│   │   ├── create_dashboard_view.py     # Vista móvil para PowerBI
+│   │   └── create_dashboard_view_voice.py # Vista voz para PowerBI
+│   └── utils/
+│       ├── postgres_handler.py          # Handler PostgreSQL optimizado
+│       └── spatial_mapper.py           # Mapeador espacial con STRtree
+├── postgres-conf/
+│   └── postgresql.conf                  # Configuración PostgreSQL
+├── excel_para_fabric/
+│   └── transfer.py                      # Exportación a Excel (auxiliar)
+├── Dockerfile.airflow                   # Imagen personalizada de Airflow
+├── docker-compose.yaml
+├── .env                                 # Variables de entorno (NO en git)
+├── .env.example
+└── .gitignore
 ```
 
-## 🚀 Instalación y Configuración
+---
 
-### Paso 0: Ejecutar Proceso de Extracción
+## Configuración
 
-⚠️ **PREREQUISITO OBLIGATORIO**: Antes de continuar, debe ejecutar el proceso de extracción de datos desde un usuario
-con acceso al Active Directory.
+### Variables de entorno
 
-1. **Cambiar al repositorio de extracción**:
-   ```bash
-   cd samm_extract_data/
-   ```
-
-2. **Configurar variables de entorno del extractor** (crear `.env` en `samm_extract_data/`):
-   ```env
-   SERVER_NAME=tu_servidor_sql
-   DATABASE_NAME=tu_base_de_datos
-   DRIVER_NAME={ODBC Driver 17 for SQL Server}
-   TABLE1=esquema.tabla_sesiones
-   TABLE2=esquema.tabla_datos_sesion
-   TABLE3=esquema.tabla_voz_sesion
-   TABLE4=esquema.tabla_calidad_voz
-   EXTRACT_DATA_OUTPUT_DIR=C:/ruta/completa/al/directorio/de/salida
-   ```
-
-3. **Ejecutar extracciones**:
-   ```bash
-   # Extraer datos móviles
-   python extract_data_datos.py
-   
-   # Extraer datos de voz
-   python extract_data_voz.py
-   ```
-
-4. **Copiar archivos extraídos al pipeline ETL**:
-   ```bash
-   # Copiar archivos parquet al directorio del pipeline ETL
-   cp [EXTRACT_DATA_OUTPUT_DIR]/*.parquet /ruta/al/pipeline/app/data/
-   ```
-
-### 1. Clonar el Repositorio del Pipeline ETL
-
-```bash
-git clone <repository-url>
-cd sma_superset
-```
-
-### 2. Configurar Variables de Entorno
-
-Crear archivo `.env` basado en `.env.example`:
+Crear `.env` en la raíz basado en `.env.example`:
 
 ```bash
 cp .env.example .env
 ```
 
-Configurar las siguientes secciones en `.env`:
-
-#### Variables SQL Server
-
 ```env
-DRIVER_NAME='ODBC Driver 17 for SQL Server'
-SERVER_NAME='your_server'
-DATABASE_NAME='your_database'
-TABLE1='table1_name'
-TABLE2='table2_name'
+# PostgreSQL
+POSTGRES_HOST=172.x.x.x
+POSTGRES_PORT=5432
+POSTGRES_DB=nombre_base_datos
+POSTGRES_USER=usuario
+POSTGRES_PASSWORD=contraseña
+
+# Airflow
+AIRFLOW_UID=50000
+_AIRFLOW_WWW_USER_USERNAME=admin
+_AIRFLOW_WWW_USER_PASSWORD=contraseña_admin
+
+# Rutas de archivos estáticos (dentro del contenedor)
+sense_file=/app/data/sense_nacional_v0.xlsx
+geojson_route=/app/data/states
 ```
 
-#### Variables PostgreSQL
-
-```env
-POSTGRES_HOST='your_postgres_host'
-POSTGRES_PORT='5432'
-POSTGRES_DB='your_database'
-POSTGRES_USER='your_user'
-POSTGRES_PASSWORD='your_password'
-```
-
-#### Variables Airflow
-
-```env
-AIRFLOW_UID='50000'
-_AIRFLOW_WWW_USER_USERNAME='admin'
-_AIRFLOW_WWW_USER_PASSWORD='your_password'
-```
-
-#### Rutas de Archivos
-
-```env
-sense_file='/app/data/sense_nacional_v0.xlsx'
-geojson_route='/app/data/states'
-```
-
-### 3. Construir Imagen Personalizada de Airflow
-
-```bash
-docker build -f Dockerfile.airflow -t custom-airflow:2.7.3 .
-```
-
-### 4. Inicializar Servicios
-
-```bash
-# Crear directorios necesarios
-mkdir -p airflow/dags airflow/logs airflow/plugins app/data
-
-# Configurar permisos
-echo -e "AIRFLOW_UID=$(id -u)" > .env.local
-
-# Inicializar Airflow
-docker-compose up airflow-init
-
-# Iniciar servicios
-docker-compose up -d
-```
-
-## 📊 Pipeline ETL
-
-### Flujo de Datos
-
-El pipeline ejecuta las siguientes etapas secuencialmente:
-
-1. **Procesamiento Móvil** (`process_mobile_data`)
-    - Carga archivos parquet móviles
-    - Procesa y limpia datos
-    - Calcula throughput
-    - Almacena en `mobile_measurements`
-
-2. **Procesamiento Voz** (`process_voice_data`)
-    - Carga archivos parquet de voz
-    - Merge de múltiples tablas
-    - Limpia y valida datos de llamadas
-    - Almacena en `voice_measurements`
-
-3. **Mapeo Espacial** (`update_all_mappings`)
-    - Procesa coordenadas de ambos tipos de datos
-    - Mapea puntos a regiones geográficas
-    - Actualiza tabla `location_mapping`
-
-4. **Vista Móvil** (`create_mobile_views`)
-    - Crea `data_dashboard_view_visualization`
-    - Incluye datos geográficos
-    - Optimizada para PowerBI
-
-5. **Vista Voz** (`create_voice_views`)
-    - Crea `voice_dashboard_view_visualization`
-    - Incluye datos geográficos
-    - Optimizada para PowerBI
-
-6. **Validación Final** (`pipeline_validation`)
-    - Valida integridad de datos
-    - Verifica mapeos espaciales
-    - Genera reporte completo
-
-### Programación
-
-- **Horario**: Diariamente a las 9:00 y 14:00
-- **Modo**: Secuencial (sin paralelización)
-- **Timeout**: 15 minutos por tarea
-
-## 🗄️ Estructura de Base de Datos
-
-### Tablas Principales
-
-#### `mobile_measurements`
-
-Almacena datos móviles procesados con todas las columnas originales más metadatos de versionado.
-
-#### `voice_measurements`
-
-Almacena datos de voz procesados con todas las columnas originales más metadatos de versionado.
-
-#### `geographic_regions`
-
-Contiene información geográfica con geometrías en formato JSONB.
-
-#### `location_mapping`
-
-Mapea mediciones a regiones geográficas.
-
-### Vistas para PowerBI
-
-#### `data_dashboard_view_visualization`
-
-Vista optimizada para análisis móvil que incluye:
-
-- Todas las columnas de datos móviles
-- Información geográfica (provincia, cantón, parroquia)
-- Datos de throughput calculados
-
-#### `voice_dashboard_view_visualization`
-
-Vista optimizada para análisis de voz que incluye:
-
-- Todas las columnas de datos de voz
-- Información geográfica
-- Métricas de calidad de llamadas
-
-## 🔧 Administración
-
-### Acceso a Servicios
-
-#### Airflow Web UI
-
-- **URL**: http://localhost:8080
-- **Usuario**: Configurado en `.env`
-- **Password**: Configurado en `.env`
-
-#### PostgreSQL
-
-- **Host**: localhost
-- **Puerto**: 5432
-- **Base de datos**: airflow (para Airflow), configurar según `.env` para datos
-
-### Comandos Útiles
-
-#### Ver logs del pipeline
-
-```bash
-docker-compose logs -f airflow-scheduler
-```
-
-#### Ejecutar DAG manualmente
-
-```bash
-docker-compose exec airflow-webserver airflow dags trigger superset_etl_pipeline
-```
-
-#### Acceder a contenedor de Airflow
-
-```bash
-docker-compose exec airflow-webserver bash
-```
-
-#### Reiniciar servicios
-
-```bash
-docker-compose restart
-```
-
-### Monitoreo
-
-#### Verificar estado de servicios
-
-```bash
-docker-compose ps
-```
-
-#### Revisar uso de recursos
-
-```bash
-docker stats
-```
-
-#### Verificar datos en PostgreSQL
-
-```bash
-docker-compose exec postgres psql -U airflow -d airflow -c "SELECT COUNT(*) FROM mobile_measurements WHERE is_current = 1;"
-```
-
-## 📈 Conexión a PowerBI
-
-### Configuración de Conexión
-
-1. **Tipo de Conexión**: PostgreSQL
-2. **Servidor**: [Tu host PostgreSQL]
-3. **Puerto**: 5432
-4. **Base de datos**: [Configurada en POSTGRES_DB]
-5. **Autenticación**: Base de datos
-6. **Usuario/Contraseña**: [Configurados en .env]
-
-### Tablas Recomendadas
-
-Para análisis móvil:
-
-```sql
-SELECT * FROM data_dashboard_view_visualization
-```
-
-Para análisis de voz:
-
-```sql
-SELECT * FROM voice_dashboard_view_visualization
-```
-
-### Campos Clave
-
-#### Datos Móviles
-
-- `ThroughputMbps`: Velocidad calculada
-- `StartLatitude`, `StartLongitude`: Coordenadas de inicio
-- `dpa_despro`, `dpa_descan`: Información geográfica
-
-#### Datos de Voz
-
-- `CallDirection`: Dirección de llamada
-- `AqmSessionEndAqmCallQuality`: Calidad de llamada
-- Coordenadas geográficas y mapeo regional
-
-## 🛠️ Desarrollo
-
-### Estructura de Código
-
-```
-sma_superset/
-├── airflow/
-│   ├── dags/           # DAGs de Airflow
-│   ├── logs/           # Logs de ejecución
-│   └── plugins/        # Plugins personalizados
-├── app/
-│   ├── data_to_server/ # Scripts ETL principales
-│   └── utils/          # Utilidades y handlers
-├── postgres-conf/      # Configuración PostgreSQL
-└── docker-compose.yaml # Configuración de servicios
-```
-
-### Agregar Nuevos Pasos al Pipeline
-
-1. Crear función en `app/data_to_server/`
-2. Importar en el DAG
-3. Crear PythonOperator
-4. Agregar a la cadena de dependencias
-
-### Personalizar Procesamiento
-
-Modificar las funciones en:
-
-- `main.py`: Procesamiento móvil
-- `main_voice.py`: Procesamiento de voz
-- `update_mapping.py`: Mapeo geográfico
-
-## 🐛 Troubleshooting
-
-### Problemas Comunes
-
-#### Error de conexión a PostgreSQL
-
-```bash
-# Verificar que PostgreSQL esté corriendo
-docker-compose ps postgres
-
-# Revisar logs
-docker-compose logs postgres
-```
-
-#### Timeouts en tareas
-
-- Aumentar `AIRFLOW__CORE__TASK_TIMEOUT` en docker-compose.yaml
-- Verificar recursos del sistema
-
-#### Archivos de datos no encontrados
-
-- Verificar que los archivos estén en `/app/data/`
-- Revisar permisos de archivos
-
-#### Memoria insuficiente
-
-- Aumentar memoria asignada a Docker
-- Reducir `BATCH_SIZE` en scripts ETL
-
-### Logs Importantes
-
-```bash
-# Logs del DAG
-docker-compose logs airflow-scheduler
-
-# Logs de tareas específicas
-docker-compose exec airflow-webserver airflow tasks logs superset_etl_pipeline [task_id] [execution_date]
-
-# Logs de base de datos
-docker-compose logs postgres
-```
-
-### Problemas Específicos del Flujo de Datos
-
-#### Archivos de extracción desactualizados
-
-```bash
-# Verificar fechas de los archivos parquet
-ls -la app/data/*.parquet
-
-# Si están desactualizados, ejecutar nuevamente el proceso de extracción
-cd samm_extract_data/
-python extract_data_datos.py
-python extract_data_voz.py
-```
-
-#### Inconsistencias entre extracción y ETL
-
-- Verificar que las fechas de extracción coincidan con el período esperado
-- Revisar los archivos de metadatos generados por el extractor:
-    - `extraction_datos_metadata.json`
-    - `extraction_voz_metadata.json`
-
-#### Coordinación de procesos
-
-- El proceso de extracción debe ejecutarse antes que el ETL
-- Verificar que los archivos estén completamente escritos antes de iniciar ETL
-- Considerar implementar verificaciones de integridad de archivos
-
-## 📝 Configuración Adicional
-
-### Flujo Completo de Trabajo
-
-Para ejecutar el proceso completo de datos, seguir este orden:
-
-#### 1. Fase de Extracción (Usuario AD)
-
-```bash
-# En máquina con acceso AD
-cd samm_extract_data/
-python extract_data_datos.py    # Extrae datos móviles
-python extract_data_voz.py      # Extrae datos de voz
-```
-
-#### 2. Transferencia de Datos
-
-```bash
-# Copiar archivos al servidor del pipeline ETL
-scp extract_*.parquet usuario@servidor:/ruta/pipeline/app/data/
-# O usar el método de transferencia apropiado para tu entorno
-```
-
-#### 3. Fase de Procesamiento (Pipeline ETL)
-
-```bash
-# En servidor del pipeline
-cd sma_superset/
-docker-compose up -d
-# El DAG se ejecutará automáticamente según programación
-```
-
-### Automatización Recomendada
-
-Para automatizar el proceso completo, considerar:
-
-1. **Script de coordinación** que ejecute extracción → transferencia → ETL
-2. **Validaciones de integridad** entre etapas
-3. **Notificaciones** de estado de cada fase
-4. **Rollback automático** en caso de errores
-
-### Variables de Entorno Requeridas
-
-Crear un archivo `.env` en la raíz del proyecto con las siguientes variables:
-
-```env
-# Variables para conexión SQL Server
-DRIVER_NAME='ODBC Driver 17 for SQL Server'
-SERVER_NAME='tu_servidor'
-DATABASE_NAME='tu_base_datos'
-TABLE1='tabla1'
-TABLE2='tabla2'
-
-# Rutas para el contenedor
-sense_file='/app/data/sense_nacional_v0.xlsx'
-geojson_route='/app/data/states'
-
-# Configuración de PostgreSQL
-POSTGRES_HOST='tu_host_postgres'
-POSTGRES_PORT='5432'
-POSTGRES_DB='tu_base_datos'
-POSTGRES_USER='tu_usuario'
-POSTGRES_PASSWORD='tu_contraseña'
-
-# Configuración de Superset
-SECRET_KEY='tu_clave_secreta'
-FLASK_APP='superset.app:create_app()'
-SUPERSET_CONFIG_PATH='/app/pythonpath/superset_config.py'
-SUPERSET_SECRET_KEY='tu_clave_superset'
-MAPBOX_API_KEY='tu_api_key_mapbox'
-
-# Configuración de Airflow
-AIRFLOW_UID='50000'
-_AIRFLOW_WWW_USER_USERNAME='admin'
-_AIRFLOW_WWW_USER_PASSWORD='tu_contraseña_admin'
-```
-
-### Preparación de Datos
-
-#### Archivos Generados por el Extractor
-
-Los siguientes archivos deben estar presentes en `app/data/` **antes** de ejecutar el pipeline ETL:
-
-1. **Archivos Parquet de Datos Móviles** (generados por `extract_data_datos.py`):
-    - `extract_datos_table1.parquet`
-    - `extract_datos_table2.parquet`
-
-2. **Archivos Parquet de Datos de Voz** (generados por `extract_data_voz.py`):
-    - `extract_voz_table1.parquet`
-    - `extract_voz_table3.parquet`
-    - `extract_voz_table4.parquet`
-
-3. **Archivos de Metadatos** (generados automáticamente):
-    - `extraction_datos_metadata.json`
-    - `extraction_voz_metadata.json`
-
-#### Archivos Adicionales Requeridos
-
-4. **Archivo Excel de Dispositivos** (provisto manualmente):
-    - `sense_nacional_v0.xlsx`
-
-5. **Archivos Geográficos** (provistos manualmente):
-    - `states/shapefile.shp` (y archivos asociados .shx, .dbf, .prj)
-
-#### Validación de Archivos
-
-Antes de iniciar el ETL, ejecutar:
+> 🔒 El archivo `.env` está en `.gitignore`. Nunca lo incluyas en un commit.
+
+### Archivos de datos requeridos
+
+Antes de ejecutar el pipeline, los siguientes archivos deben estar presentes en `app/data/`:
+
+| Archivo                                    | Origen                           |
+|--------------------------------------------|----------------------------------|
+| `extract_datos_table1.parquet`             | Generado por `samm_extract_data` |
+| `extract_datos_table2.parquet`             | Generado por `samm_extract_data` |
+| `extract_voz_table1.parquet`               | Generado por `samm_extract_data` |
+| `extract_voz_table3.parquet`               | Generado por `samm_extract_data` |
+| `extract_voz_table4.parquet`               | Generado por `samm_extract_data` |
+| `sense_nacional_v0.xlsx`                   | Provisto manualmente             |
+| `states/shapefile.shp` (+.shx, .dbf, .prj) | Provisto manualmente             |
 
 ```bash
 # Verificar presencia de archivos
 ls -la app/data/extract_*.parquet
 ls -la app/data/sense_nacional_v0.xlsx
-ls -la app/data/states/shapefile.*
-
-# Verificar tamaños (los archivos no deben estar vacíos)
-du -h app/data/extract_*.parquet
+ls -la app/data/states/
 ```
-
-## 🔄 Flujo de Ejecución
-
-### Arquitectura de Dos Fases
-
-#### Fase 1: Extracción (Usuario AD Requerido)
-
-1. **Prerequisitos**:
-    - Usuario con permisos de Active Directory
-    - Acceso a SQL Server con autenticación Windows
-    - Repositorio `samm_extract_data/` configurado
-
-2. **Proceso**:
-    - Extrae datos desde SQL Server (2025-01-01 hasta presente)
-    - Genera archivos Parquet optimizados
-    - Crea metadatos de extracción
-
-3. **Salida**:
-    - 5 archivos `.parquet` con datos limpios
-    - 2 archivos `.json` con metadatos
-
-#### Fase 2: Pipeline ETL (Dockerizado)
-
-1. **Entrada**:
-    - Archivos Parquet de la Fase 1
-    - Archivos geográficos y de dispositivos
-
-2. **Procesamiento Secuencial**:
-    - **Extracción y Procesamiento** → Carga y limpia datos fuente
-    - **Transformación** → Aplica reglas de negocio y cálculos
-    - **Mapeo Geográfico** → Asocia coordenadas con regiones
-    - **Creación de Vistas** → Genera vistas optimizadas para análisis
-    - **Validación** → Verifica integridad y calidad de datos
-
-3. **Salida**:
-    - Datos estructurados en PostgreSQL
-    - Vistas optimizadas para PowerBI
-
-### Programación y Scheduling
-
-- **Extracción**: Manual o programada vía cron/Task Scheduler
-- **ETL Pipeline**: Automático via Airflow (9:00 y 14:00 diariamente)
-- **Coordinación**: La extracción debe completarse antes del ETL
-
-## 📊 Métricas y Monitoring
-
-El sistema incluye validación automática que reporta:
-
-- Número de registros procesados por tipo de datos
-- Porcentaje de éxito en mapeo geográfico
-- Calidad de datos (registros con coordenadas válidas)
-- Estado de las vistas generadas
-- Tiempo de ejecución por etapa
-
-## 🔒 Seguridad
-
-- Las credenciales se configuran a través de variables de entorno
-- Conexiones de base de datos utilizan autenticación por usuario/contraseña
-- Los logs no exponen información sensible
-- El acceso a Airflow requiere autenticación
-
-## 📄 Licencia
-
-Este proyecto está bajo la Licencia MIT. Ver archivo `LICENSE` para más detalles.
 
 ---
 
-Para soporte técnico o preguntas específicas, consultar la documentación de cada componente o crear un issue en el
-repositorio.
+## Instalación
+
+### 1. Clonar el repositorio
+
+```bash
+git clone https://github.com/Zerausir/sma_superset.git
+cd sma_superset
+```
+
+### 2. Configurar variables de entorno
+
+```bash
+cp .env.example .env
+# Editar .env con los valores correctos
+```
+
+### 3. Crear directorios necesarios
+
+```bash
+mkdir -p airflow/dags airflow/logs airflow/plugins app/data
+```
+
+### 4. Construir imagen personalizada de Airflow
+
+La imagen incluye dependencias adicionales (geopandas, pyarrow, psycopg2, shapely):
+
+```bash
+docker build -f Dockerfile.airflow -t custom-airflow:2.7.3 .
+```
+
+### 5. Inicializar y arrancar servicios
+
+```bash
+# Inicializar base de datos de Airflow
+docker-compose up airflow-init
+
+# Arrancar todos los servicios
+docker-compose up -d
+
+# Verificar estado
+docker-compose ps
+```
+
+### 6. Copiar archivos de datos
+
+```bash
+# Desde la máquina con acceso AD (después de ejecutar samm_extract_data)
+scp /ruta/local/*.parquet usuario@servidor:/ruta/sma_superset/app/data/
+```
+
+### 7. Acceder a Airflow
+
+Abrir http://localhost:8080 con las credenciales configuradas en `.env`.
+
+---
+
+## Pipeline ETL
+
+### Paso 1 — `process_mobile_data`
+
+**Script**: `app/data_to_server/main.py`
+
+Carga `extract_datos_table1.parquet` y `extract_datos_table2.parquet`, aplica filtros (solo sesiones HTTP
+Download/Post), elimina duplicados, realiza merge entre tablas, calcula throughput en Mbps, filtra registros sin
+coordenadas válidas y almacena en `mobile_measurements`.
+
+### Paso 2 — `process_voice_data`
+
+**Script**: `app/data_to_server/main_voice.py`
+
+Carga los 3 archivos Parquet de voz, filtra sesiones Voice MO, realiza merge entre tablas, filtra registros sin
+coordenadas válidas y almacena en `voice_measurements`.
+
+### Paso 3 — `update_all_mappings`
+
+**Script**: `app/data_to_server/update_mapping.py`
+
+Para cada medición sin mapeo geográfico, determina a qué parroquia/cantón/provincia pertenece usando un índice espacial
+R-tree sobre el shapefile de Ecuador, e inserta en `location_mapping`.
+
+### Paso 4 — `create_mobile_views`
+
+**Script**: `app/data_to_server/create_dashboard_view.py`
+
+Recrea la vista `data_dashboard_view_visualization` con todas las columnas de `mobile_measurements` más la información
+geográfica (provincia, cantón, parroquia). La vista se elimina y recrea en cada ejecución para reflejar cambios de
+schema.
+
+### Paso 5 — `create_voice_views`
+
+**Script**: `app/data_to_server/create_dashboard_view_voice.py`
+
+Ídem para datos de voz: vista `voice_dashboard_view_visualization`.
+
+### Paso 6 — `pipeline_validation`
+
+Valida integridad completa: conteo de registros en tablas y vistas, porcentaje de mapeo geográfico (umbral mínimo 50%),
+existencia de vistas. Genera reporte de estado.
+
+---
+
+## Base de Datos
+
+### Tablas principales
+
+#### `mobile_measurements`
+
+Almacena mediciones móviles procesadas. Columnas base fijas + columnas dinámicas agregadas automáticamente según el
+schema del Parquet de entrada.
+
+| Columna                | Tipo                               | Descripción                        |
+|------------------------|------------------------------------|------------------------------------|
+| `measurement_id`       | `VARCHAR` PK                       | MD5 determinístico de campos clave |
+| `valid_from`           | `TIMESTAMP`                        | Timestamp de inserción             |
+| `is_current`           | `INTEGER`                          | Flag de registro activo (1)        |
+| `batch_id`             | `VARCHAR`                          | ID del batch de inserción          |
+| *(columnas dinámicas)* | `TEXT` / `DOUBLE PRECISION` / etc. | Todas las columnas del Parquet     |
+
+#### `voice_measurements`
+
+Misma estructura que `mobile_measurements` para datos de voz.
+
+#### `geographic_regions`
+
+Regiones geográficas del shapefile de Ecuador (1 081 parroquias). Se inserta una sola vez al inicio y no se modifica.
+
+#### `location_mapping`
+
+Mapa entre `measurement_id` y `region_id`. Clave compuesta `(measurement_id, region_id, location_type)`.
+
+### Vistas para PowerBI
+
+```sql
+-- Datos móviles con información geográfica
+SELECT * FROM data_dashboard_view_visualization;
+
+-- Datos de voz con información geográfica
+SELECT * FROM voice_dashboard_view_visualization;
+```
+
+### Índices
+
+```sql
+-- mobile_measurements
+idx_mobile_batch_id, idx_mobile_valid_from, idx_mobile_is_current, idx_mobile_ingestion
+
+-- voice_measurements
+idx_voice_batch_id, idx_voice_valid_from, idx_voice_is_current, idx_voice_ingestion
+
+-- geographic_regions
+idx_geo_batch_id, idx_geo_valid_from, idx_geo_is_current, idx_geo_despro, idx_geo_descan
+
+-- location_mapping
+idx_location_mapping_measurement, idx_location_mapping_region, idx_location_mapping_type
+```
+
+---
+
+## Administración
+
+### Comandos útiles
+
+```bash
+# Ver estado de servicios
+docker-compose ps
+
+# Ver logs en tiempo real
+docker-compose logs -f airflow-scheduler
+
+# Ejecutar DAG manualmente
+docker-compose exec airflow-webserver airflow dags trigger superset_etl_pipeline
+
+# Consultar registros en PostgreSQL
+docker-compose exec postgres psql -U airflow -d airflow -c \
+  "SELECT COUNT(*) FROM mobile_measurements WHERE is_current = 1;"
+
+# Verificar uso de recursos
+docker stats
+```
+
+## Carga Histórica Inicial
+
+Procesar más de ~6 meses de datos en una sola ejecución puede causar `SIGKILL -9` (OOM del sistema operativo) dado que
+el merge en memoria requiere tener múltiples DataFrames grandes simultáneamente. La estrategia recomendada es cargar por
+trimestres:
+
+### Procedimiento
+
+Para cada trimestre:
+
+1. Ajustar fechas en `samm_extract_data` y ejecutar los extractores
+2. Copiar los Parquet al servidor: `app/data/`
+3. Ejecutar el DAG manualmente desde Airflow
+4. Esperar a que el pipeline complete (`pipeline_validation` en verde)
+5. Continuar con el siguiente trimestre
+
+Los datos se acumulan correctamente — el mecanismo `ON CONFLICT DO NOTHING` garantiza que no haya duplicados entre runs.
+
+| Trimestre      | fecha_inicio | fecha_fin        |
+|----------------|--------------|------------------|
+| Q1 2025        | 2025-01-01   | 2025-03-31       |
+| Q2 2025        | 2025-04-01   | 2025-06-30       |
+| Q3 2025        | 2025-07-01   | 2025-09-30       |
+| Q4 2025        | 2025-10-01   | 2025-12-31       |
+| 2026 hasta hoy | 2026-01-01   | *(fecha actual)* |
+
+Una vez completada la carga inicial, el pipeline vuelve a su operación normal con el rango de 166 días configurado en
+`samm_extract_data`.
+
+---
+
+## Solución de Problemas
+
+### SIGKILL -9 en `process_mobile_data`
+
+El OOM killer del sistema operativo terminó el proceso por falta de RAM. Usar la estrategia de carga por trimestres. No
+hay límites de contenedor configurados — el límite es la RAM física del host.
+
+### Error de conexión a PostgreSQL
+
+```bash
+# Verificar que el servicio esté corriendo
+docker-compose ps postgres
+
+# Ver logs
+docker-compose logs postgres
+```
+
+### Archivos de datos no encontrados
+
+```bash
+# Verificar presencia y tamaño
+ls -lah app/data/extract_*.parquet
+```
+
+### Timeout en tareas de Airflow
+
+El timeout por tarea está configurado en 15 minutos (`AIRFLOW__CORE__TASK_TIMEOUT: 900`). Para volúmenes grandes,
+aumentar este valor en `docker-compose.yaml`.
+
+### Baja tasa de mapeo geográfico (<10%)
+
+El `spatial_mapper.py` activa automáticamente un diagnóstico de rangos de coordenadas. Verificar que las coordenadas en
+los datos de entrada estén dentro del bounding box de Ecuador (Lat: -6 a 3, Lon: -93 a -74).
+
+### Logs importantes
+
+```bash
+# DAG completo
+docker-compose logs airflow-scheduler
+
+# Tarea específica
+docker-compose exec airflow-webserver airflow tasks logs \
+  superset_etl_pipeline process_mobile_data <execution_date>
+```
