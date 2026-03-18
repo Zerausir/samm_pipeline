@@ -11,7 +11,12 @@ Cambios respecto a la versión original:
        - Todos los ALTER TABLE se emiten en una única transacción.
   3. _prepare_data_with_guarantee:
        - Reemplazado df.iterrows() por df.itertuples() (~5x más rápido).
-  4. Resto de la lógica preservada sin cambios.
+  4. create_raw_tables / upsert_raw_measurements / upsert_raw_voice_measurements:
+       - Nuevas tablas mobile_raw_measurements y voice_raw_measurements.
+       - Almacenan datos regulatorios completos (sin dropna de coordenadas
+         ni throughput) para los dashboards de Grafana.
+       - Reutilizan el motor _upsert_dataframe() y _batch_add_columns() existentes.
+  5. Resto de la lógica preservada sin cambios.
 """
 
 import datetime
@@ -67,11 +72,11 @@ class PostgresDataHandler:
             raise ConnectionError(f"Failed to connect to PostgreSQL: {e}")
 
     # ------------------------------------------------------------------
-    # DDL — create tables & indexes
+    # DDL — create clean tables & indexes (PowerBI)
     # ------------------------------------------------------------------
 
     def create_tables(self):
-        """Create tables and indexes if they don't exist."""
+        """Create clean tables and indexes if they don't exist."""
         mobile_measurements_table = """
             CREATE TABLE IF NOT EXISTS mobile_measurements (
                 measurement_id VARCHAR PRIMARY KEY,
@@ -148,7 +153,69 @@ class PostgresDataHandler:
             raise
 
     # ------------------------------------------------------------------
-    # Schema helpers — batch DDL (FIX #2)
+    # DDL — create raw tables & indexes (Grafana / regulatorio)
+    # ------------------------------------------------------------------
+
+    def create_raw_tables(self):
+        """
+        Crea mobile_raw_measurements y voice_raw_measurements si no existen.
+
+        Estas tablas almacenan datos regulatorios COMPLETOS:
+          - Sin dropna de coordenadas (sesión fallida = dato válido)
+          - Sin dropna de ThroughputMbps (NULL = red no respondió)
+          - Sin filtro de SessionType ni CallDirection
+            → Los dashboards de Grafana filtran en las vistas, no aquí.
+        """
+        mobile_raw_table = """
+            CREATE TABLE IF NOT EXISTS mobile_raw_measurements (
+                measurement_id VARCHAR PRIMARY KEY,
+                valid_from TIMESTAMP NOT NULL,
+                valid_to TIMESTAMP,
+                is_current INTEGER DEFAULT 1,
+                batch_id VARCHAR,
+                ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """
+        voice_raw_table = """
+            CREATE TABLE IF NOT EXISTS voice_raw_measurements (
+                measurement_id VARCHAR PRIMARY KEY,
+                valid_from TIMESTAMP NOT NULL,
+                valid_to TIMESTAMP,
+                is_current INTEGER DEFAULT 1,
+                batch_id VARCHAR,
+                ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """
+        raw_mobile_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_raw_mobile_batch_id    ON mobile_raw_measurements(batch_id);",
+            "CREATE INDEX IF NOT EXISTS idx_raw_mobile_valid_from   ON mobile_raw_measurements(valid_from);",
+            "CREATE INDEX IF NOT EXISTS idx_raw_mobile_is_current   ON mobile_raw_measurements(is_current);",
+            "CREATE INDEX IF NOT EXISTS idx_raw_mobile_ingestion    ON mobile_raw_measurements(ingestion_timestamp);",
+        ]
+        raw_voice_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_raw_voice_batch_id    ON voice_raw_measurements(batch_id);",
+            "CREATE INDEX IF NOT EXISTS idx_raw_voice_valid_from   ON voice_raw_measurements(valid_from);",
+            "CREATE INDEX IF NOT EXISTS idx_raw_voice_is_current   ON voice_raw_measurements(is_current);",
+            "CREATE INDEX IF NOT EXISTS idx_raw_voice_ingestion    ON voice_raw_measurements(ingestion_timestamp);",
+        ]
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(mobile_raw_table)
+                    cur.execute(voice_raw_table)
+                    for idx in raw_mobile_indexes + raw_voice_indexes:
+                        try:
+                            cur.execute(idx)
+                        except psycopg2.Error as e:
+                            print(f"Warning: Could not create raw index: {e}")
+                conn.commit()
+                print("✅ Raw tables and indexes created/verified successfully")
+        except Exception as e:
+            print(f"❌ Error creating raw tables: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Schema helpers — batch DDL
     # ------------------------------------------------------------------
 
     def _ensure_mobile_columns_exist(self, df: pd.DataFrame):
@@ -166,18 +233,34 @@ class PostgresDataHandler:
         self._batch_add_columns("mobile_measurements", df, critical_columns)
 
     def _ensure_voice_columns_exist(self, df: pd.DataFrame):
-        """
-        Add missing columns to voice_measurements in a SINGLE transaction.
-        """
+        """Add missing columns to voice_measurements in a SINGLE transaction."""
         critical_columns = [
             "DatasourceId", "CallIndex", "IMSI", "IMEI",
             "EndLatitude", "EndLongitude",
         ]
         self._batch_add_columns("voice_measurements", df, critical_columns)
 
+    def _ensure_raw_mobile_columns_exist(self, df: pd.DataFrame):
+        """Add missing columns to mobile_raw_measurements in a SINGLE transaction."""
+        critical_columns = [
+            "DatasourceId", "SessionId",
+            "StartLatitude", "StartLongitude",
+            "EndLatitude", "EndLongitude",
+        ]
+        self._batch_add_columns("mobile_raw_measurements", df, critical_columns)
+
+    def _ensure_raw_voice_columns_exist(self, df: pd.DataFrame):
+        """Add missing columns to voice_raw_measurements in a SINGLE transaction."""
+        critical_columns = [
+            "DatasourceId", "CallIndex", "IMSI", "IMEI",
+            "EndLatitude", "EndLongitude",
+        ]
+        self._batch_add_columns("voice_raw_measurements", df, critical_columns)
+
     def _batch_add_columns(self, table_name: str, df: pd.DataFrame, critical_columns: List[str]):
         """
         Core helper: detect missing columns and add them all in one transaction.
+        Compartido por las tablas clean y raw — el nombre de tabla se pasa como argumento.
         """
         try:
             with self._get_connection() as conn:
@@ -253,12 +336,12 @@ class PostgresDataHandler:
             raise
 
     # ------------------------------------------------------------------
-    # Upsert — mobile measurements (FIX #1)
+    # Upsert — clean mobile measurements (PowerBI)
     # ------------------------------------------------------------------
 
     def upsert_measurements(self, df: pd.DataFrame, chunk_size: int = 5000):
         """
-        Upsert mobile measurement data.
+        Upsert mobile measurement data → mobile_measurements (analítico/PowerBI).
 
         Original: 4 round-trips por registro (SAVEPOINT + SELECT + INSERT + RELEASE).
         Optimizado: execute_batch con INSERT … ON CONFLICT DO NOTHING.
@@ -277,12 +360,12 @@ class PostgresDataHandler:
             raise
 
     # ------------------------------------------------------------------
-    # Upsert — voice measurements (FIX #1)
+    # Upsert — clean voice measurements (PowerBI)
     # ------------------------------------------------------------------
 
     def upsert_voice_measurements(self, df: pd.DataFrame, chunk_size: int = 5000):
         """
-        Upsert voice measurement data.
+        Upsert voice measurement data → voice_measurements (analítico/PowerBI).
 
         Original: 4 round-trips por registro (SAVEPOINT + SELECT + INSERT + RELEASE).
         Optimizado: execute_batch con INSERT … ON CONFLICT DO NOTHING.
@@ -300,7 +383,55 @@ class PostgresDataHandler:
             raise
 
     # ------------------------------------------------------------------
-    # Core upsert engine — shared by mobile & voice
+    # Upsert — raw mobile measurements (Grafana / regulatorio)
+    # ------------------------------------------------------------------
+
+    def upsert_raw_measurements(self, df: pd.DataFrame, chunk_size: int = 5000):
+        """
+        Upsert de datos móviles crudos → mobile_raw_measurements (regulatorio/Grafana).
+
+        Misma mecánica que upsert_measurements() — motor _upsert_dataframe() compartido.
+        La tabla destino conserva filas con coordenadas nulas y ThroughputMbps nulo:
+        una sesión fallida es un dato regulatorio válido.
+        """
+        try:
+            self._ensure_raw_mobile_columns_exist(df)
+            self._upsert_dataframe(
+                df,
+                table_name="mobile_raw_measurements",
+                data_type="mobile",
+                chunk_size=chunk_size,
+            )
+        except Exception as e:
+            print(f"❌ Critical error in upsert_raw_measurements: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Upsert — raw voice measurements (Grafana / regulatorio)
+    # ------------------------------------------------------------------
+
+    def upsert_raw_voice_measurements(self, df: pd.DataFrame, chunk_size: int = 5000):
+        """
+        Upsert de datos de voz crudos → voice_raw_measurements (regulatorio/Grafana).
+
+        Misma mecánica que upsert_voice_measurements() — motor _upsert_dataframe() compartido.
+        La tabla destino conserva todas las direcciones de llamada (MO y MT) y filas
+        con coordenadas nulas: el filtro de CallDirection se aplica en la vista Grafana.
+        """
+        try:
+            self._ensure_raw_voice_columns_exist(df)
+            self._upsert_dataframe(
+                df,
+                table_name="voice_raw_measurements",
+                data_type="voice",
+                chunk_size=chunk_size,
+            )
+        except Exception as e:
+            print(f"❌ Critical error in upsert_raw_voice_measurements: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Core upsert engine — shared by all tables (clean + raw)
     # ------------------------------------------------------------------
 
     def _upsert_dataframe(
@@ -314,6 +445,8 @@ class PostgresDataHandler:
         Generic bulk-upsert: prepares records and calls execute_batch per chunk.
 
         Complejidad original : O(4N) round-trips  → O(N/chunk_size) round-trips
+        Usado por: upsert_measurements, upsert_voice_measurements,
+                   upsert_raw_measurements, upsert_raw_voice_measurements.
         """
         total_records = len(df)
         total_new = 0
@@ -451,6 +584,10 @@ class PostgresDataHandler:
 
         Original: df.iterrows() — crea una Series por fila (lento).
         Optimizado: df.itertuples() — ~5x más rápido para DataFrames grandes.
+
+        Usado tanto por las tablas clean como por las raw — el measurement_id
+        hash se calcula sobre los mismos campos de negocio independientemente
+        de la tabla destino.
         """
         if data_type == "mobile":
             id_fields = [
