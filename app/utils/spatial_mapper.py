@@ -10,7 +10,7 @@ Cambios respecto a la versión original:
   2. _load_region_geometries → _load_region_geometries_cached:
        - Original: se llamaba dos veces por ejecución (mobile + voice), recargando
          desde PostgreSQL cada vez.
-       - Optimizado: resultado almacenado en self._geometry_cache.  La segunda
+       - Optimizado: resultado almacenado en self._geometry_cache. La segunda
          llamada (voice) reutiliza el cache en memoria.
 
   3. _insert_batch_mappings:
@@ -18,6 +18,27 @@ Cambios respecto a la versión original:
        - Optimizado: execute_batch con page_size configurable.
 
   4. BATCH_SIZE: 500 → 2 000 (más eficiente para cursores de servidor).
+
+  5. [FIX 2026-03-20] _find_matching_region_strtree:
+       - Original: point.within(geometry) → False para puntos en la frontera
+         del polígono (relación topológica estricta).
+       - Corregido: geometry.covers(point) → True incluso en la frontera.
+       - Impacto: puntos GPS sobre límites de parroquia (vías, ríos) ahora
+         se mapean correctamente. Afectaba principalmente a sesiones fallidas
+         cuyas coordenadas se capturan en zonas de baja cobertura / frontera.
+
+  6. [FIX 2026-03-20] Nuevos métodos para tablas raw:
+       - process_and_map_raw_mobile_locations() → mobile_raw_measurements
+       - process_and_map_raw_voice_locations()  → voice_raw_measurements
+       - process_all_raw_locations()            → ambas tablas raw
+       - El método process_all_locations() original sigue apuntando a las
+         tablas clean (mobile_measurements / voice_measurements) sin cambios.
+       - Antes de este fix, update_raw_mapping.py llamaba process_all_locations()
+         que mapeaba las tablas clean en lugar de las raw, dejando todos los
+         measurement_id exclusivos de las tablas raw sin entrada en
+         location_mapping y causando que grafana_mobile_geo_view y
+         grafana_voice_geo_view devolvieran NULL en Provincia/Cantón/Parroquia
+         para sesiones fallidas y otros registros sin ThroughputMbps.
 
   Todo lo demás (validación de coordenadas, lógica de negocio, API pública)
   se preserva sin cambios de comportamiento.
@@ -59,28 +80,68 @@ class SpatialMapper:
         return psycopg2.connect(**self.connection_params)
 
     # ------------------------------------------------------------------
-    # Public API (unchanged signatures)
+    # Public API — tablas CLEAN (PowerBI)
     # ------------------------------------------------------------------
 
     def process_and_map_locations(self) -> int:
-        """Process and map mobile measurement locations."""
+        """Process and map mobile measurement locations (clean table)."""
         return self._process_locations("mobile_measurements", "mobile")
 
     def process_and_map_voice_locations(self) -> int:
-        """Process and map voice measurement locations."""
+        """Process and map voice measurement locations (clean table)."""
         return self._process_locations("voice_measurements", "voice")
 
     def process_all_locations(self) -> int:
-        """Process both mobile and voice in one call (shared geometry cache)."""
-        print("=== 🗺️  Iniciando mapeo espacial para todos los tipos de datos ===")
+        """
+        Process both mobile and voice CLEAN tables in one call.
+        Shared geometry cache avoids double DB load.
+        Used by: update_mapping.py (paso 6 del DAG).
+        """
+        print("=== 🗺️  Iniciando mapeo espacial para datos CLEAN ===")
         mobile_count = self.process_and_map_locations()
         voice_count = self.process_and_map_voice_locations()
         total = mobile_count + voice_count
-        print("\n=== 📊 Resumen del mapeo espacial ===")
+        print("\n=== 📊 Resumen del mapeo espacial CLEAN ===")
         print(f"Mappings móviles creados: {mobile_count:,}")
         print(f"Mappings de voz creados:  {voice_count:,}")
         print(f"Total mappings creados:   {total:,}")
         return total
+
+    # ------------------------------------------------------------------
+    # Public API — tablas RAW (Grafana / regulatorio)
+    # [FIX 2026-03-20] Métodos nuevos — antes process_all_locations() era
+    # llamado desde update_raw_mapping.py, lo que mapeaba las tablas clean
+    # en lugar de las raw y dejaba sin mapeo a todos los registros
+    # exclusivos de mobile_raw_measurements / voice_raw_measurements.
+    # ------------------------------------------------------------------
+
+    def process_and_map_raw_mobile_locations(self) -> int:
+        """Process and map raw mobile measurement locations."""
+        return self._process_locations("mobile_raw_measurements", "mobile_raw")
+
+    def process_and_map_raw_voice_locations(self) -> int:
+        """Process and map raw voice measurement locations."""
+        return self._process_locations("voice_raw_measurements", "voice_raw")
+
+    def process_all_raw_locations(self) -> int:
+        """
+        Process both mobile and voice RAW tables in one call.
+        Shared geometry cache avoids double DB load.
+        Used by: update_raw_mapping.py (paso 7 del DAG).
+        """
+        print("=== 🗺️  Iniciando mapeo espacial para datos RAW ===")
+        mobile_count = self.process_and_map_raw_mobile_locations()
+        voice_count = self.process_and_map_raw_voice_locations()
+        total = mobile_count + voice_count
+        print("\n=== 📊 Resumen del mapeo espacial RAW ===")
+        print(f"Mappings móviles raw creados: {mobile_count:,}")
+        print(f"Mappings de voz raw creados:  {voice_count:,}")
+        print(f"Total mappings raw creados:   {total:,}")
+        return total
+
+    # ------------------------------------------------------------------
+    # Mapping table DDL
+    # ------------------------------------------------------------------
 
     def create_mapping_table(self):
         """Create location_mapping table and indexes if they don't exist."""
@@ -168,7 +229,7 @@ class SpatialMapper:
                                 ignored += 1
                                 continue
 
-                            # FIX #1: STRtree lookup instead of linear scan
+                            # FIX #1: STRtree lookup + covers() instead of within()
                             region_match = self._find_matching_region_strtree(
                                 points, region_geometries, tree, tree_ids
                             )
@@ -230,7 +291,7 @@ class SpatialMapper:
         Load region geometries from PostgreSQL and build an STRtree index.
 
         Result is cached in self._geometry_cache so that successive calls
-        (mobile → voice) do not hit the database again.
+        (mobile → voice, or clean → raw) do not hit the database again.
         """
         if self._geometry_cache is not None:
             print(
@@ -292,7 +353,7 @@ class SpatialMapper:
             return {}, STRtree([]), []
 
     # ------------------------------------------------------------------
-    # Region matching with STRtree (FIX #1)
+    # Region matching with STRtree (FIX #1 + FIX #5)
     # ------------------------------------------------------------------
 
     def _find_matching_region_strtree(
@@ -306,25 +367,32 @@ class SpatialMapper:
         Find the region that contains any of the given points.
 
         Uses STRtree.query() to obtain only candidate geometries whose
-        bounding boxes intersect with the point, then does exact within()
+        bounding boxes intersect with the point, then does exact covers()
         check only on those candidates.
+
+        FIX #5: usa geometry.covers(point) en lugar de point.within(geometry).
+          - within() es estricto: punto en la frontera → False.
+          - covers() incluye la frontera: punto en el borde → True.
+          - Esto corrige el mapeo de puntos GPS sobre límites de parroquia
+            (vías, ríos), que afectaba principalmente a sesiones fallidas
+            cuyas coordenadas se capturan en zonas de baja cobertura.
 
         Complexity: O(log n_regions) vs O(n_regions) original.
         """
+        # Strategy 1: first point that falls within (or on the boundary of) any region
         for point in points:
-            # query() returns indices into the list used to build the tree
             candidate_indices = tree.query(point)
             for idx in candidate_indices:
                 region_id = tree_ids[idx]
                 try:
-                    if point.within(region_geometries[region_id]):
+                    # FIX #5: covers() = within() ∪ boundary
+                    if region_geometries[region_id].covers(point):
                         return {"region_id": region_id, "location_type": "single_point"}
                 except Exception:
                     continue
 
         # Strategy 2: all points in the same region
         if len(points) > 1:
-            # Start with candidates for the first point, intersect with all others
             first_candidates = set(tree.query(points[0]))
             for point in points[1:]:
                 first_candidates &= set(tree.query(point))
@@ -332,7 +400,7 @@ class SpatialMapper:
             for idx in first_candidates:
                 region_id = tree_ids[idx]
                 try:
-                    if all(p.within(region_geometries[region_id]) for p in points):
+                    if all(region_geometries[region_id].covers(p) for p in points):
                         return {"region_id": region_id, "location_type": "all_points"}
                 except Exception:
                     continue
@@ -340,12 +408,14 @@ class SpatialMapper:
         return None
 
     # Keep the original linear-scan method for reference / testing
-    def _find_matching_region(self, points: List[Point], region_geometries: Dict[str, object]) -> Optional[dict]:
+    def _find_matching_region(
+            self, points: List[Point], region_geometries: Dict[str, object]
+    ) -> Optional[dict]:
         """Original O(n) linear scan — kept for backward-compat / unit tests."""
         for point in points:
             for region_id, region_geom in region_geometries.items():
                 try:
-                    if point.within(region_geom):
+                    if region_geom.covers(point):
                         return {"region_id": region_id, "location_type": "single_point"}
                 except Exception:
                     continue
@@ -353,7 +423,7 @@ class SpatialMapper:
         if len(points) > 1:
             for region_id, region_geom in region_geometries.items():
                 try:
-                    if all(p.within(region_geom) for p in points):
+                    if all(region_geom.covers(p) for p in points):
                         return {"region_id": region_id, "location_type": "all_points"}
                 except Exception:
                     continue
@@ -395,7 +465,7 @@ class SpatialMapper:
     # ------------------------------------------------------------------
 
     def _build_coordinate_query(self, table_name: str, data_type: str) -> str:
-        """Build coordinate-fetch query (same for mobile and voice)."""
+        """Build coordinate-fetch query (same for all table variants)."""
         return f"""
             SELECT m.measurement_id,
                    m."StartLatitude",  m."StartLongitude",
