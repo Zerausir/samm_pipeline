@@ -12,6 +12,13 @@ Diferencias respecto a main_voice.py (PowerBI / analítico):
 Extensibilidad:
   Llamadas MT u otros análisis futuros solo requieren una nueva vista
   sobre voice_raw_measurements, sin reprocesar histórico.
+
+Fix 2026-03-20:
+  Agregados CallDroppedDateTime y CallBlockedDateTime a required_columns
+  de _process_table3. Ambas columnas existen en cdr.SessionSummaryVoice
+  (SQL Server) y llegan al parquet vía SELECT *, pero el practicante las
+  omitió en required_columns — quedaban descartadas antes del merge y la
+  vista grafana_voice_geo_view las exportaba siempre como NULL::TEXT.
 """
 
 import gc
@@ -128,6 +135,7 @@ def _process_table1_raw(df):
 
 # ---------------------------------------------------------------------------
 # table3 — idéntico a main_voice.py (no tiene filtros ni dropna)
+# FIX 2026-03-20: agregados CallDroppedDateTime y CallBlockedDateTime
 # ---------------------------------------------------------------------------
 
 def _process_table3(df):
@@ -155,9 +163,15 @@ def _process_table3(df):
         'CallSetupDomain', 'CallSetupUserPerceivedCallSetupTime',
         'CallEstablishedUserCallEstablishedTime', 'CallEstablishedCallAnswerDelay',
         'BearerTechnology',
+        'CallDroppedDateTime',  # FIX: existía en SQL Server y parquet, pero se descartaba
+        'CallBlockedDateTime',  # FIX: ídem
     ]
     existing = [c for c in required_columns if c in df.columns]
     df = df[existing].copy()
+
+    missing_cols = [c for c in required_columns if c not in existing]
+    if missing_cols:
+        print(f"  ⚠️  Columnas no encontradas en table3: {missing_cols}")
 
     dup_cols = [c for c in [
         'DatasourceId', 'StartRadioTechnology', 'EndRadioTechnology',
@@ -175,6 +189,7 @@ def _process_table3(df):
         'CallInitiationDateTime', 'CallEndDateTime',
         'EutranReselectionTimeAfterCsfbCallDateTime',
         'CallAttemptDateTime', 'CallBlockedDateTime', 'CallReestablishedDateTime',
+        'CallDroppedDateTime',  # FIX: asegurar conversión de tipo
     ]
     for col in datetime_cols:
         if col in df.columns:
@@ -358,41 +373,47 @@ def process_raw_voice_data(dataframes, chunk_size=8_000):
 
         df3_2_1_merged = df3_2_merged.merge(df1, on=merge_cols_12, how='left',
                                             suffixes=('', '_df1'))
-        del df3_2_merged, df1
-        gc.collect()
         print(f"✅ Tras merge 2: {len(df3_2_1_merged):,} filas")
 
-        # PASO 4: merge con sense_nacional
-        print("\n📱 PASO 4: Merge con sense_nacional (IMSI + IMEI)...")
-        dataset_final = df3_2_1_merged.merge(df4, on=['IMSI', 'IMEI'],
-                                             how='left', suffixes=('', '_df4'))
-        del df3_2_1_merged, df4
+        del df3_2_merged, df1
         gc.collect()
+
+        # PASO 4: merge resultado + sense_nacional (idéntico a main_voice.py)
+        print("\n📱 PASO 4: Merge resultado + sense_nacional (IMSI + IMEI)...")
+        dataset_final = df3_2_1_merged.merge(df4, on=['IMSI', 'IMEI'], how='left',
+                                             suffixes=('', '_df4'))
         print(f"✅ Tras merge 3 (final): {len(dataset_final):,} filas")
 
-        # Resumen SIN dropna
-        total = len(dataset_final)
-        sin_coords = (dataset_final[['EndLatitude', 'EndLongitude']]
-                      .isna().any(axis=1).sum()
-                      if 'EndLatitude' in dataset_final.columns else 0)
-        con_device = (dataset_final['Device'].notna().sum()
-                      if 'Device' in dataset_final.columns else 0)
+        del df3_2_1_merged, df4
+        gc.collect()
 
-        print(f"\n📊 RESUMEN DATASET RAW VOZ:")
-        print(f"   Total filas                   : {total:,}")
-        print(f"   Sin coordenadas (conservadas) : {sin_coords:,} ({sin_coords / total * 100:.1f}%)")
-        print(f"   Con Device enriquecido        : {con_device:,} ({con_device / total * 100:.1f}%)")
+        # SIN dropna final — coordenadas nulas son datos regulatorios válidos
+        print("\n✅ Sin filtrado de coordenadas (raw — datos regulatorios completos)")
+
+        print(f"\n🎯 RESUMEN FINAL")
         print("=" * 70)
+        print(f"📊 Dataset final: {len(dataset_final):,} filas × {len(dataset_final.columns)} columnas")
+
+        # Resumen de columnas de interés para métricas de voz
+        for col in ['CallAttemptDateTime', 'CallDroppedDateTime',
+                    'CallBlockedDateTime', 'CallEstablishedDateTime',
+                    'DialEndServiceStatus']:
+            if col in dataset_final.columns:
+                non_null = dataset_final[col].notna().sum()
+                print(f"   {col}: {non_null:,} no-nulos ({non_null / len(dataset_final) * 100:.1f}%)")
+            else:
+                print(f"   ⚠️  {col}: columna no presente en dataset final")
 
         return dataset_final
 
     except Exception as e:
+        print(f"❌ Error in process_raw_voice_data: {e}")
         gc.collect()
         raise
 
 
 # ---------------------------------------------------------------------------
-# Validación mínima
+# Validación
 # ---------------------------------------------------------------------------
 
 def validate_raw_voice_data(df):
