@@ -460,9 +460,6 @@ def process_voice_data_chunked(dataframes, chunk_size=10000):
         else:
             print(f"No coordinate filtering needed: {initial_rows:,} records")
 
-        del df3_2_1_merged
-        gc.collect()
-
         print(f"\n🎯 RESUMEN FINAL DEL MERGE COMPLETO")
         print("=" * 70)
         print(f"📊 Dataset final: {len(dataset_final):,} filas × {len(dataset_final.columns)} columnas")
