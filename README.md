@@ -1,7 +1,13 @@
 # sma_superset
 
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+[![Airflow 2.7.3](https://img.shields.io/badge/airflow-2.7.3-017CEE.svg)](https://airflow.apache.org/)
+[![PostgreSQL 17](https://img.shields.io/badge/postgresql-17-336791.svg)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/docker-compose-2496ED.svg)](https://www.docker.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Pipeline ETL completo para procesamiento de datos de telecomunicaciones móviles y de voz, orquestado con Apache Airflow
-y almacenado en PostgreSQL para análisis en PowerBI.
+y almacenado en PostgreSQL para análisis en PowerBI y Grafana.
 
 ---
 
@@ -15,6 +21,7 @@ y almacenado en PostgreSQL para análisis en PowerBI.
 - [Instalación](#instalación)
 - [Pipeline ETL](#pipeline-etl)
 - [Base de Datos](#base-de-datos)
+- [Vistas Disponibles](#vistas-disponibles)
 - [Administración](#administración)
 - [Carga Histórica Inicial](#carga-histórica-inicial)
 - [Solución de Problemas](#solución-de-problemas)
@@ -25,22 +32,21 @@ y almacenado en PostgreSQL para análisis en PowerBI.
 
 Este pipeline recibe archivos Parquet generados por [
 `samm_extract_data`](https://github.com/Zerausir/samm_extract_data), los procesa, los almacena en PostgreSQL y crea
-vistas optimizadas para su consumo en PowerBI. El sistema corre completamente dockerizado con Apache Airflow como
-orquestador.
+vistas optimizadas para su consumo en PowerBI y Grafana. El sistema corre completamente dockerizado con Apache Airflow
+como orquestador.
 
 ### Flujo completo de datos
 
 ```
 [SQL Server] ──► [samm_extract_data] ──► [Archivos Parquet]
-                    (máquina AD)
-                                               │
-                                               ▼
-                                        [sma_superset]
-                                               │
-                              ┌────────────────┼────────────────┐
-                              ▼                ▼                ▼
-                         Airflow DAG     PostgreSQL        PowerBI
-                         (orquesta)     (almacena)       (visualiza)
+                    (máquina AD)                  │
+                                                  ▼
+                                           [sma_superset]
+                                                  │
+                             ┌────────────────────┼─────────────────────┐
+                             ▼                    ▼                     ▼
+                        Airflow DAG         PostgreSQL             PowerBI / Grafana
+                        (orquesta)    (almacena + vistas)          (visualiza)
 ```
 
 ---
@@ -49,35 +55,40 @@ orquestador.
 
 ### Servicios Docker
 
-| Servicio            | Imagen                 | Función                                |
-|---------------------|------------------------|----------------------------------------|
-| `postgres`          | `postgres:17-alpine`   | Base de datos principal                |
-| `airflow-webserver` | `custom-airflow:2.7.3` | UI de monitoreo (puerto 8080)          |
-| `airflow-scheduler` | `custom-airflow:2.7.3` | Orquestador del DAG                    |
-| `airflow-init`      | `custom-airflow:2.7.3` | Inicialización única del ambiente      |
-| `data-processor`    | `python:3.11`          | Contenedor auxiliar para procesamiento |
+| Servicio            | Imagen                 | Puerto | Función                              |
+|---------------------|------------------------|--------|--------------------------------------|
+| `postgres`          | `postgres:17-alpine`   | 5432   | Base de datos principal              |
+| `airflow-webserver` | `custom-airflow:2.7.3` | 8080   | UI de monitoreo                      |
+| `airflow-scheduler` | `custom-airflow:2.7.3` | —      | Orquestador del DAG                  |
+| `airflow-init`      | `custom-airflow:2.7.3` | —      | Inicialización única del ambiente    |
+| `data-processor`    | `python:3.11`          | —      | Contenedor auxiliar de procesamiento |
 
 ### DAG: `superset_etl_pipeline`
 
-El pipeline es **secuencial** — cada paso depende del anterior:
+El pipeline es **completamente secuencial** — cada paso depende del anterior:
 
 ```
-process_mobile_data
+process_mobile_data          (paso 1)
         │
-        ▼
-process_voice_data
+process_voice_data           (paso 2)
         │
-        ▼
-update_all_mappings
+process_raw_mobile_data      (paso 3)
         │
-        ▼
-create_mobile_views
+process_raw_voice_data       (paso 4)
         │
-        ▼
-create_voice_views
+load_datasource              (paso 5)
         │
-        ▼
-pipeline_validation
+update_all_mappings          (paso 6)
+        │
+update_raw_mappings          (paso 7)
+        │
+create_mobile_views          (paso 8)
+        │
+create_voice_views           (paso 9)
+        │
+create_grafana_geo_views     (paso 10)
+        │
+pipeline_validation          (paso 11)
 ```
 
 **Horario**: diariamente a las 09:00 y 14:00 (zona horaria `America/New_York`).
@@ -97,7 +108,7 @@ pipeline_validation
 - 8 GB de RAM para el host de Docker
 - 20 GB de espacio en disco
 
-> ⚠️ **Sin límites de memoria en contenedores**: los contenedores de Airflow usan toda la RAM disponible del host. Para
+> ⚠️ Los contenedores de Airflow no tienen límites de memoria configurados — usan toda la RAM disponible del host. Para
 > volúmenes de datos grandes (>6 meses de historia), ver [Carga Histórica Inicial](#carga-histórica-inicial).
 
 ---
@@ -108,38 +119,63 @@ pipeline_validation
 sma_superset/
 ├── airflow/
 │   ├── dags/
-│   │   └── superset_etl_dag.py          # DAG principal con 6 pasos
-│   ├── logs/                            # Logs de ejecución (auto-generado)
+│   │   └── superset_etl_dag.py              # DAG principal — 11 pasos secuenciales
+│   ├── logs/                                # Logs de ejecución (auto-generado)
 │   └── plugins/
+│       ├── custom_hooks.py                  # PostgreSQLCustomHook
+│       └── custom_operators.py              # WindowsServiceOperator
 ├── app/
-│   ├── data/                            # Archivos Parquet y estáticos (NO en git)
-│   │   ├── extract_datos_table1.parquet
-│   │   ├── extract_datos_table2.parquet
-│   │   ├── extract_voz_table1.parquet
-│   │   ├── extract_voz_table3.parquet
-│   │   ├── extract_voz_table4.parquet
-│   │   ├── sense_nacional_v0.xlsx
-│   │   └── states/                      # Shapefile de Ecuador
+│   ├── data/                                # Archivos Parquet y estáticos (NO en git)
+│   │   ├── extract_datos_table1.parquet     # ← generado por samm_extract_data
+│   │   ├── extract_datos_table2.parquet     # ← generado por samm_extract_data
+│   │   ├── extract_voz_table1.parquet       # ← generado por samm_extract_data
+│   │   ├── extract_voz_table3.parquet       # ← generado por samm_extract_data
+│   │   ├── extract_voz_table4.parquet       # ← generado por samm_extract_data
+│   │   ├── extract_datasource.parquet       # ← generado por samm_extract_data
+│   │   ├── sense_nacional_v0.xlsx           # ← provisto manualmente
+│   │   └── states/                          # Shapefile de Ecuador
 │   │       ├── shapefile.shp
 │   │       ├── shapefile.shx
 │   │       ├── shapefile.dbf
 │   │       └── shapefile.prj
 │   ├── data_to_server/
-│   │   ├── main.py                      # ETL datos móviles
-│   │   ├── main_voice.py                # ETL datos de voz
-│   │   ├── update_mapping.py            # Mapeo espacial
-│   │   ├── create_dashboard_view.py     # Vista móvil para PowerBI
-│   │   └── create_dashboard_view_voice.py # Vista voz para PowerBI
+│   │   ├── main.py                          # ETL datos móviles → mobile_measurements
+│   │   ├── main_voice.py                    # ETL datos de voz → voice_measurements
+│   │   ├── main_raw_mobile.py               # ETL raw móvil → mobile_raw_measurements
+│   │   ├── main_raw_voice.py                # ETL raw voz → voice_raw_measurements
+│   │   ├── load_datasource.py               # Catálogo → datasource_phones
+│   │   ├── update_mapping.py                # Mapeo espacial (tablas clean)
+│   │   ├── update_raw_mapping.py            # Mapeo espacial (tablas raw)
+│   │   ├── create_dashboard_view.py         # Vista PowerBI — datos móviles
+│   │   ├── create_dashboard_view_voice.py   # Vista PowerBI — datos de voz
+│   │   └── create_grafana_geo_views.py      # Vistas Grafana georeferenciadas
+│   ├── tests/
+│   │   ├── check_odbc.py
+│   │   ├── table_access_test.py
+│   │   ├── test_postgresql_connection.py
+│   │   ├── test_postgis.py
+│   │   └── test_samm_server_connection.py
 │   └── utils/
-│       ├── postgres_handler.py          # Handler PostgreSQL optimizado
-│       └── spatial_mapper.py           # Mapeador espacial con STRtree
-├── postgres-conf/
-│   └── postgresql.conf                  # Configuración PostgreSQL
+│       ├── postgres_handler.py              # Handler PostgreSQL optimizado
+│       └── spatial_mapper.py               # Mapeador espacial con STRtree
+├── diagrama_arquitectura/                   # Diagramas HTML interactivos
 ├── excel_para_fabric/
-│   └── transfer.py                      # Exportación a Excel (auxiliar)
-├── Dockerfile.airflow                   # Imagen personalizada de Airflow
+│   └── transfer.py                          # Exportación a Excel (auxiliar)
+├── nginx/
+│   └── nginx.conf                           # Reverse proxy HTTPS (opcional)
+├── postgres-conf/
+│   └── postgresql.conf                      # Tuning PostgreSQL
+├── scripts/
+│   ├── start_airflow.bat                    # Inicio local (Windows)
+│   ├── start_postgres.bat                   # Inicio local (Windows)
+│   └── start_superset.bat                   # Inicio local (Windows)
+├── superset/
+│   ├── __init__.py
+│   └── superset_config.py                   # Config Apache Superset (opcional)
+├── Dockerfile.airflow                        # Imagen personalizada de Airflow
 ├── docker-compose.yaml
-├── .env                                 # Variables de entorno (NO en git)
+├── requirements.txt
+├── .env                                     # Variables de entorno (NO en git)
 ├── .env.example
 └── .gitignore
 ```
@@ -172,6 +208,10 @@ _AIRFLOW_WWW_USER_PASSWORD=contraseña_admin
 # Rutas de archivos estáticos (dentro del contenedor)
 sense_file=/app/data/sense_nacional_v0.xlsx
 geojson_route=/app/data/states
+
+# Superset (opcional)
+SUPERSET_SECRET_KEY=clave_secreta
+MAPBOX_API_KEY=tu_mapbox_api_key
 ```
 
 > 🔒 El archivo `.env` está en `.gitignore`. Nunca lo incluyas en un commit.
@@ -180,15 +220,16 @@ geojson_route=/app/data/states
 
 Antes de ejecutar el pipeline, los siguientes archivos deben estar presentes en `app/data/`:
 
-| Archivo                                    | Origen                           |
-|--------------------------------------------|----------------------------------|
-| `extract_datos_table1.parquet`             | Generado por `samm_extract_data` |
-| `extract_datos_table2.parquet`             | Generado por `samm_extract_data` |
-| `extract_voz_table1.parquet`               | Generado por `samm_extract_data` |
-| `extract_voz_table3.parquet`               | Generado por `samm_extract_data` |
-| `extract_voz_table4.parquet`               | Generado por `samm_extract_data` |
-| `sense_nacional_v0.xlsx`                   | Provisto manualmente             |
-| `states/shapefile.shp` (+.shx, .dbf, .prj) | Provisto manualmente             |
+| Archivo                                    | Origen                                             |
+|--------------------------------------------|----------------------------------------------------|
+| `extract_datos_table1.parquet`             | `samm_extract_data` → `extract_data_datos.py`      |
+| `extract_datos_table2.parquet`             | `samm_extract_data` → `extract_data_datos.py`      |
+| `extract_voz_table1.parquet`               | `samm_extract_data` → `extract_data_voz.py`        |
+| `extract_voz_table3.parquet`               | `samm_extract_data` → `extract_data_voz.py`        |
+| `extract_voz_table4.parquet`               | `samm_extract_data` → `extract_data_voz.py`        |
+| `extract_datasource.parquet`               | `samm_extract_data` → `extract_data_datasource.py` |
+| `sense_nacional_v0.xlsx`                   | Provisto manualmente                               |
+| `states/shapefile.shp` (+.shx, .dbf, .prj) | Provisto manualmente                               |
 
 ```bash
 # Verificar presencia de archivos
@@ -223,7 +264,7 @@ mkdir -p airflow/dags airflow/logs airflow/plugins app/data
 
 ### 4. Construir imagen personalizada de Airflow
 
-La imagen incluye dependencias adicionales (geopandas, pyarrow, psycopg2, shapely):
+La imagen incluye dependencias adicionales: `geopandas`, `pyarrow`, `psycopg2`, `shapely`, `libspatialindex-dev`.
 
 ```bash
 docker build -f Dockerfile.airflow -t custom-airflow:2.7.3 .
@@ -251,7 +292,7 @@ scp /ruta/local/*.parquet usuario@servidor:/ruta/sma_superset/app/data/
 
 ### 7. Acceder a Airflow
 
-Abrir http://localhost:8080 con las credenciales configuradas en `.env`.
+Abrir [http://localhost:8080](http://localhost:8080) con las credenciales configuradas en `.env`.
 
 ---
 
@@ -261,42 +302,79 @@ Abrir http://localhost:8080 con las credenciales configuradas en `.env`.
 
 **Script**: `app/data_to_server/main.py`
 
-Carga `extract_datos_table1.parquet` y `extract_datos_table2.parquet`, aplica filtros (solo sesiones HTTP
-Download/Post), elimina duplicados, realiza merge entre tablas, calcula throughput en Mbps, filtra registros sin
-coordenadas válidas y almacena en `mobile_measurements`.
+Carga `extract_datos_table1.parquet` y `extract_datos_table2.parquet`. Filtra sesiones `HTTP Download` y `HTTP Post`,
+elimina duplicados, realiza merge chunked entre tablas, calcula `ThroughputMbps`, filtra coordenadas inválidas y
+almacena en `mobile_measurements` usando `execute_batch` + `ON CONFLICT DO NOTHING`.
 
 ### Paso 2 — `process_voice_data`
 
 **Script**: `app/data_to_server/main_voice.py`
 
-Carga los 3 archivos Parquet de voz, filtra sesiones Voice MO, realiza merge entre tablas, filtra registros sin
-coordenadas válidas y almacena en `voice_measurements`.
+Carga los 3 archivos Parquet de voz. Filtra sesiones `Voice MO`, realiza merge chunked con `SessionSummaryVoice` como
+tabla intermedia, filtra coordenadas inválidas y almacena en `voice_measurements`. Incluye `CallDroppedDateTime` y
+`CallBlockedDateTime` para métricas regulatorias completas.
 
-### Paso 3 — `update_all_mappings`
+### Paso 3 — `process_raw_mobile_data`
+
+**Script**: `app/data_to_server/main_raw_mobile.py`
+
+Mismo proceso que el paso 1, **sin** filtro de `SessionType` y **sin** `dropna` de coordenadas ni `ThroughputMbps`.
+Almacena en `mobile_raw_measurements`. Los filtros se aplican en la vista Grafana, no en la tabla.
+
+### Paso 4 — `process_raw_voice_data`
+
+**Script**: `app/data_to_server/main_raw_voice.py`
+
+Usa `SessionSummaryVoice` (table3) como base del merge para capturar **todas** las llamadas — establecidas, fallidas,
+bloqueadas y caídas. Sin `dropna`. Almacena en `voice_raw_measurements`.
+
+### Paso 5 — `load_datasource`
+
+**Script**: `app/data_to_server/load_datasource.py`
+
+Lee `extract_datasource.parquet` (PhoneNumber, IMSI, IMEI) y enriquece con Device y CZO desde `sense_nacional_v0.xlsx`.
+Realiza upsert en `datasource_phones` e incluye limpieza post-upsert: normalización de `+593XXXXXXXXX → 0XXXXXXXXX`,
+eliminación de duplicados por IMEI y eliminación de registros sin Device/CZO.
+
+### Paso 6 — `update_all_mappings`
 
 **Script**: `app/data_to_server/update_mapping.py`
 
-Para cada medición sin mapeo geográfico, determina a qué parroquia/cantón/provincia pertenece usando un índice espacial
-R-tree sobre el shapefile de Ecuador, e inserta en `location_mapping`.
+Mapea coordenadas de `mobile_measurements` y `voice_measurements` a regiones geográficas usando un índice espacial *
+*STRtree** (R-tree de Shapely). Complejidad O(n·log(r)) vs O(n·r) del algoritmo original. Las geometrías se cargan desde
+`geographic_regions` y se cachean en memoria para evitar doble consulta a la base de datos.
 
-### Paso 4 — `create_mobile_views`
+### Paso 7 — `update_raw_mappings`
+
+**Script**: `app/data_to_server/update_raw_mapping.py`
+
+Mismo proceso que el paso 6 pero sobre `mobile_raw_measurements` y `voice_raw_measurements`. Reutiliza el cache de
+geometrías si ya fue cargado en el paso 6.
+
+### Paso 8 — `create_mobile_views`
 
 **Script**: `app/data_to_server/create_dashboard_view.py`
 
-Recrea la vista `data_dashboard_view_visualization` con todas las columnas de `mobile_measurements` más la información
-geográfica (provincia, cantón, parroquia). La vista se elimina y recrea en cada ejecución para reflejar cambios de
-schema.
+Recrea la vista `data_dashboard_view_visualization` con todas las columnas de `mobile_measurements` más información
+geográfica (provincia, cantón, parroquia). Se elimina y recrea en cada ejecución para reflejar cambios de schema.
 
-### Paso 5 — `create_voice_views`
+### Paso 9 — `create_voice_views`
 
 **Script**: `app/data_to_server/create_dashboard_view_voice.py`
 
 Ídem para datos de voz: vista `voice_dashboard_view_visualization`.
 
-### Paso 6 — `pipeline_validation`
+### Paso 10 — `create_grafana_geo_views`
 
-Valida integridad completa: conteo de registros en tablas y vistas, porcentaje de mapeo geográfico (umbral mínimo 50%),
-existencia de vistas. Genera reporte de estado.
+**Script**: `app/data_to_server/create_grafana_geo_views.py`
+
+Crea vistas georeferenciadas para los dashboards de Grafana. Los filtros de `SessionType` y `CallDirection` se aplican
+en la definición de la vista para máxima extensibilidad.
+
+### Paso 11 — `pipeline_validation`
+
+Valida integridad completa: conteo de registros en tablas clean y raw, porcentaje de mapeo geográfico (umbral mínimo
+50%), existencia de todas las vistas, registros en `datasource_phones`. Genera reporte de estado.
 
 ---
 
@@ -304,55 +382,81 @@ existencia de vistas. Genera reporte de estado.
 
 ### Tablas principales
 
-#### `mobile_measurements`
+#### `mobile_measurements` / `voice_measurements`
 
-Almacena mediciones móviles procesadas. Columnas base fijas + columnas dinámicas agregadas automáticamente según el
-schema del Parquet de entrada.
+Datos analíticos limpios para PowerBI. Schema dinámico — columnas agregadas automáticamente según el Parquet de entrada.
 
-| Columna                | Tipo                               | Descripción                        |
-|------------------------|------------------------------------|------------------------------------|
-| `measurement_id`       | `VARCHAR` PK                       | MD5 determinístico de campos clave |
-| `valid_from`           | `TIMESTAMP`                        | Timestamp de inserción             |
-| `is_current`           | `INTEGER`                          | Flag de registro activo (1)        |
-| `batch_id`             | `VARCHAR`                          | ID del batch de inserción          |
-| *(columnas dinámicas)* | `TEXT` / `DOUBLE PRECISION` / etc. | Todas las columnas del Parquet     |
+| Columna                | Tipo                               | Descripción                             |
+|------------------------|------------------------------------|-----------------------------------------|
+| `measurement_id`       | `VARCHAR` PK                       | Hash MD5 determinístico de campos clave |
+| `valid_from`           | `TIMESTAMP`                        | Timestamp de inserción                  |
+| `is_current`           | `INTEGER`                          | Flag de registro activo (1)             |
+| `batch_id`             | `VARCHAR`                          | ID del batch de inserción               |
+| *(columnas dinámicas)* | `TEXT` / `DOUBLE PRECISION` / etc. | Todas las columnas del Parquet          |
 
-#### `voice_measurements`
+#### `mobile_raw_measurements` / `voice_raw_measurements`
 
-Misma estructura que `mobile_measurements` para datos de voz.
+Datos regulatorios completos para Grafana. Misma estructura que las tablas clean pero sin `dropna` de coordenadas ni
+ThroughputMbps — sesiones fallidas son datos regulatorios válidos.
 
 #### `geographic_regions`
 
-Regiones geográficas del shapefile de Ecuador (1 081 parroquias). Se inserta una sola vez al inicio y no se modifica.
+Regiones geográficas del shapefile de Ecuador (1 081 parroquias). Se inserta una sola vez al inicio.
 
 #### `location_mapping`
 
 Mapa entre `measurement_id` y `region_id`. Clave compuesta `(measurement_id, region_id, location_type)`.
 
-### Vistas para PowerBI
+#### `datasource_phones`
+
+Catálogo de dispositivos: `PhoneNumber ↔ IMSI ↔ IMEI ↔ Device ↔ CZO`. Clave `phone_id` (MD5 de PhoneNumber + IMEI).
+
+---
+
+## Vistas Disponibles
+
+### PowerBI
 
 ```sql
--- Datos móviles con información geográfica
+-- Datos móviles con información geográfica completa
 SELECT * FROM data_dashboard_view_visualization;
 
--- Datos de voz con información geográfica
+-- Datos de voz con información geográfica completa
 SELECT * FROM voice_dashboard_view_visualization;
 ```
 
-### Índices
+### Grafana
 
 ```sql
--- mobile_measurements
-idx_mobile_batch_id, idx_mobile_valid_from, idx_mobile_is_current, idx_mobile_ingestion
+-- HTTP Post + HTTP Download (regulatorio) — con Provincia, Cantón, Parroquia, PhoneNumber, Device, CZO
+SELECT * FROM grafana_mobile_geo_view;
 
--- voice_measurements
-idx_voice_batch_id, idx_voice_valid_from, idx_voice_is_current, idx_voice_ingestion
+-- Llamadas MO (regulatorio) — con Provincia, Cantón, Parroquia, PhoneNumber, Device, CZO
+SELECT * FROM grafana_voice_geo_view;
+```
 
--- geographic_regions
-idx_geo_batch_id, idx_geo_valid_from, idx_geo_is_current, idx_geo_despro, idx_geo_descan
+#### Columnas adicionales en vistas Grafana
 
--- location_mapping
-idx_location_mapping_measurement, idx_location_mapping_region, idx_location_mapping_type
+| Columna         | Fuente                          | Descripción                   |
+|-----------------|---------------------------------|-------------------------------|
+| `"Provincia"`   | `geographic_regions.dpa_despro` | Nombre de la provincia        |
+| `"Cantón"`      | `geographic_regions.dpa_descan` | Nombre del cantón             |
+| `"Parroquia"`   | `geographic_regions.dpa_despar` | Nombre de la parroquia        |
+| `"PhoneNumber"` | `datasource_phones`             | Número de teléfono del equipo |
+| `"Device"`      | `datasource_phones`             | Modelo del dispositivo        |
+| `"CZO"`         | `datasource_phones`             | Zona de control operativa     |
+
+#### Variables Grafana compatibles
+
+```sql
+-- $SimOperator
+SELECT DISTINCT "SimOperator" FROM grafana_mobile_geo_view WHERE "SimOperator" IS NOT NULL ORDER BY "SimOperator";
+
+-- $PhoneNumber
+SELECT DISTINCT "PhoneNumber" FROM grafana_mobile_geo_view
+WHERE "SimOperator" IN (${SimOperator}) AND "PhoneNumber" IS NOT NULL ORDER BY "PhoneNumber";
+
+-- Filtro de tiempo: "StartTime" >= $__timeFrom() AND "EndTime" <= $__timeTo()
 ```
 
 ---
@@ -375,27 +479,36 @@ docker-compose exec airflow-webserver airflow dags trigger superset_etl_pipeline
 docker-compose exec postgres psql -U airflow -d airflow -c \
   "SELECT COUNT(*) FROM mobile_measurements WHERE is_current = 1;"
 
+# Verificar mapeo geográfico
+docker-compose exec postgres psql -U airflow -d airflow -c \
+  "SELECT COUNT(*) FROM location_mapping;"
+
+# Verificar catálogo de dispositivos
+docker-compose exec postgres psql -U airflow -d airflow -c \
+  "SELECT COUNT(*) FROM datasource_phones WHERE \"Device\" IS NOT NULL;"
+
 # Verificar uso de recursos
 docker stats
 ```
 
+---
+
 ## Carga Histórica Inicial
 
 Procesar más de ~6 meses de datos en una sola ejecución puede causar `SIGKILL -9` (OOM del sistema operativo) dado que
-el merge en memoria requiere tener múltiples DataFrames grandes simultáneamente. La estrategia recomendada es cargar por
-trimestres:
+el merge en memoria requiere tener múltiples DataFrames grandes simultáneamente.
 
-### Procedimiento
+### Procedimiento por trimestres
 
 Para cada trimestre:
 
-1. Ajustar fechas en `samm_extract_data` y ejecutar los extractores
-2. Copiar los Parquet al servidor: `app/data/`
-3. Ejecutar el DAG manualmente desde Airflow
-4. Esperar a que el pipeline complete (`pipeline_validation` en verde)
-5. Continuar con el siguiente trimestre
+1. Ajustar fechas en `samm_extract_data` y ejecutar los 3 extractores.
+2. Copiar los Parquet al servidor: `app/data/`.
+3. Ejecutar el DAG manualmente desde Airflow UI.
+4. Esperar a que `pipeline_validation` quede en verde.
+5. Continuar con el siguiente trimestre.
 
-Los datos se acumulan correctamente — el mecanismo `ON CONFLICT DO NOTHING` garantiza que no haya duplicados entre runs.
+Los datos se acumulan correctamente — `ON CONFLICT DO NOTHING` garantiza que no haya duplicados entre runs.
 
 | Trimestre      | fecha_inicio | fecha_fin        |
 |----------------|--------------|------------------|
@@ -405,14 +518,11 @@ Los datos se acumulan correctamente — el mecanismo `ON CONFLICT DO NOTHING` ga
 | Q4 2025        | 2025-10-01   | 2025-12-31       |
 | 2026 hasta hoy | 2026-01-01   | *(fecha actual)* |
 
-Una vez completada la carga inicial, el pipeline vuelve a su operación normal con el rango de 166 días configurado en
-`samm_extract_data`.
-
 ---
 
 ## Solución de Problemas
 
-### SIGKILL -9 en `process_mobile_data`
+### SIGKILL -9 en `process_mobile_data` o `process_raw_mobile_data`
 
 El OOM killer del sistema operativo terminó el proceso por falta de RAM. Usar la estrategia de carga por trimestres. No
 hay límites de contenedor configurados — el límite es la RAM física del host.
@@ -432,6 +542,7 @@ docker-compose logs postgres
 ```bash
 # Verificar presencia y tamaño
 ls -lah app/data/extract_*.parquet
+ls -lah app/data/extract_datasource.parquet
 ```
 
 ### Timeout en tareas de Airflow
@@ -444,6 +555,17 @@ aumentar este valor en `docker-compose.yaml`.
 El `spatial_mapper.py` activa automáticamente un diagnóstico de rangos de coordenadas. Verificar que las coordenadas en
 los datos de entrada estén dentro del bounding box de Ecuador (Lat: -6 a 3, Lon: -93 a -74).
 
+### Vistas Grafana con NULL en Provincia/Cantón/Parroquia
+
+Verificar que `update_raw_mappings` (paso 7) se haya ejecutado correctamente — este paso mapea las tablas `raw`, no las
+`clean`. Si el porcentaje de mapeo es bajo, revisar la cobertura del shapefile y los rangos de coordenadas con el
+diagnóstico automático.
+
+### Catálogo de dispositivos sin Device/CZO
+
+Verificar que `sense_nacional_v0.xlsx` esté presente en `app/data/` y que contenga las columnas `Device` y `CZO`.
+Revisar el match por IMSI + IMEI entre `extract_datasource.parquet` y el Excel.
+
 ### Logs importantes
 
 ```bash
@@ -453,4 +575,8 @@ docker-compose logs airflow-scheduler
 # Tarea específica
 docker-compose exec airflow-webserver airflow tasks logs \
   superset_etl_pipeline process_mobile_data <execution_date>
+
+# Validación del pipeline
+docker-compose exec airflow-webserver airflow tasks logs \
+  superset_etl_pipeline pipeline_validation <execution_date>
 ```
