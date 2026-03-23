@@ -6,19 +6,27 @@ ETL de datos de voz crudos → voice_raw_measurements (regulatorio / Grafana).
 Diferencias respecto a main_voice.py (PowerBI / analítico):
   - Sin filtro de SessionType en table1: se conservan todos (MO, MT, etc.).
     La vista grafana_voice_geo_view filtra CallDirection = 'MO'.
-  - Sin dropna de coordenadas en table4: filas sin GPS se conservan.
-  - Sin dropna final de coordenadas.
+  - Sin dropna de coordenadas.
+  - Sin dropna final.
 
-Extensibilidad:
-  Llamadas MT u otros análisis futuros solo requieren una nueva vista
-  sobre voice_raw_measurements, sin reprocesar histórico.
+Fix 2026-03-23 — cambio arquitectural:
+  ANTES: table4 (SessionVoiceQuality) era la base del merge.
+         table4 solo contiene llamadas que generaron scores AQM, es decir,
+         llamadas establecidas. Las llamadas fallidas, bloqueadas y caídas
+         nunca generan registros en table4 → se perdían del pipeline raw.
 
-Fix 2026-03-20:
-  Agregados CallDroppedDateTime y CallBlockedDateTime a required_columns
-  de _process_table3. Ambas columnas existen en cdr.SessionSummaryVoice
-  (SQL Server) y llegan al parquet vía SELECT *, pero el practicante las
-  omitió en required_columns — quedaban descartadas antes del merge y la
-  vista grafana_voice_geo_view las exportaba siempre como NULL::TEXT.
+  AHORA: table3 (SessionSummaryVoice) es la base del merge.
+         table3 contiene TODAS las llamadas (establecidas, fallidas,
+         bloqueadas, caídas) — exactamente como el Dashboard de Grafana
+         en SQL Server que parte de cdr.SessionSummaryVoice.
+         table4 ya no se usa en el pipeline raw porque las métricas AQM
+         necesarias (AqmSessionEndAqmCallQuality, ...Downlink, ...Uplink)
+         provienen de table3, no de table4.
+
+Nuevo orden de merges:
+  table3 (SessionSummaryVoice) ← BASE (todas las llamadas)
+      LEFT JOIN table1 (SessionSummary)  on [DatasourceId, CallIndex]
+      LEFT JOIN sense_nacional           on [IMSI, IMEI]
 """
 
 import gc
@@ -43,7 +51,7 @@ def get_env_var(var_name, default=None):
 
 
 # ---------------------------------------------------------------------------
-# Carga de datos — idéntica a main_voice.py
+# Carga de datos
 # ---------------------------------------------------------------------------
 
 def load_voice_data():
@@ -51,7 +59,6 @@ def load_voice_data():
     voice_files = {
         'table1': f"{data_dir}/extract_voz_table1.parquet",
         'table3': f"{data_dir}/extract_voz_table3.parquet",
-        'table4': f"{data_dir}/extract_voz_table4.parquet",
         'sense_nacional': f"{data_dir}/sense_nacional_v0.xlsx",
     }
 
@@ -61,7 +68,7 @@ def load_voice_data():
         return None
 
     dataframes = {}
-    for key in ['table1', 'table3', 'table4']:
+    for key in ['table1', 'table3']:
         try:
             print(f"Leyendo: {voice_files[key]}")
             dataframes[key] = pd.read_parquet(voice_files[key])
@@ -82,13 +89,16 @@ def load_voice_data():
 
 
 # ---------------------------------------------------------------------------
-# table1 — igual que main_voice.py EXCEPTO: sin filtro SessionType == 'Voice MO'
+# table1 — SessionSummary
+# Sin filtro de SessionType (main_voice.py filtra 'Voice MO')
 # ---------------------------------------------------------------------------
 
 def _process_table1_raw(df):
     """
     Normaliza SessionSummary sin filtrar por SessionType.
-    main_voice.py filtra SessionType == 'Voice MO'. Aquí se conservan todos.
+    Aporta: StartTime, EndTime, SimOperator, Operator, IMSI, IMEI,
+            StartLatitude/Longitude, EndLatitude/Longitude,
+            StartRadioTechnology, EndRadioTechnology al merge con table3.
     """
     print("Procesando SessionSummary (raw — todos los SessionType)...")
 
@@ -102,6 +112,10 @@ def _process_table1_raw(df):
     ]
     existing = [c for c in required_columns if c in df.columns]
     df = df[existing].copy()
+
+    missing_cols = [c for c in required_columns if c not in existing]
+    if missing_cols:
+        print(f"  ⚠️  Columnas no encontradas en table1: {missing_cols}")
 
     dup_cols = [c for c in [
         'DatasourceId', 'SessionType', 'StartRadioTechnology', 'IMSI', 'IMEI',
@@ -129,18 +143,27 @@ def _process_table1_raw(df):
     if 'SessionType' in df.columns:
         print(f"  SessionType distribución: {df['SessionType'].value_counts().to_dict()}")
 
-    print(f"  table1 raw lista: {len(df):,} filas (sin filtro SessionType)")
+    # Renombrar para el merge con table3
+    if 'SessionIdOrCallIndex' in df.columns:
+        df = df.rename(columns={'SessionIdOrCallIndex': 'CallIndex'})
+
+    print(f"  table1 raw lista: {len(df):,} filas")
     return df
 
 
 # ---------------------------------------------------------------------------
-# table3 — idéntico a main_voice.py (no tiene filtros ni dropna)
+# table3 — SessionSummaryVoice (BASE del pipeline raw)
+# Contiene TODAS las llamadas: establecidas, fallidas, bloqueadas, caídas
 # FIX 2026-03-20: agregados CallDroppedDateTime y CallBlockedDateTime
 # ---------------------------------------------------------------------------
 
 def _process_table3(df):
-    """Normaliza SessionSummaryVoice — lógica idéntica a main_voice.py."""
-    print("Procesando SessionSummaryVoice...")
+    """
+    Normaliza SessionSummaryVoice.
+    Es la BASE del merge raw — contiene todas las llamadas.
+    Aporta todas las métricas de voz para los dashboards regulatorios.
+    """
+    print("Procesando SessionSummaryVoice (base del merge raw)...")
 
     required_columns = [
         'DatasourceId', 'CallIndex', 'CallDirection', 'AqmCallType',
@@ -153,18 +176,20 @@ def _process_table3(df):
         'CallReestablishedDateTime', 'CallEndDateTime', 'CallEndRadioTechnology',
         'CallEndCause', 'CallEndType', 'CallEndDomain', 'CallEndCallDuration',
         'AqmSessionEndOtherPartyPhoneNumber', 'AqmSessionEndPhoneNumber',
-        'AqmSessionEndAqmCallQuality', 'AqmSessionEndAqmCallQualityDownlink',
-        'AqmSessionEndAqmCallQualityUplink', 'AqmAlgorithmDownlink',
-        'AqmAlgorithmUplink', 'SpeechCodecs', 'SpeechPathDelayOneWay',
-        'SilentCall', 'SpeechInterruptionTimeDownlinkDuration',
+        'AqmSessionEndAqmCallQuality',  # métrica para mapa
+        'AqmSessionEndAqmCallQualityDownlink',  # métrica para mapa
+        'AqmSessionEndAqmCallQualityUplink',  # métrica para mapa
+        'AqmAlgorithmDownlink', 'AqmAlgorithmUplink',
+        'SpeechCodecs', 'SpeechPathDelayOneWay', 'SilentCall',
+        'SpeechInterruptionTimeDownlinkDuration',
         'RtpInterruptionTimeAudioInterruptionTime',
         'HandoverSpeechInterruptionDownlinkDuration', 'CallSetupOffHookTime',
         'CallAttemptAccessNetworkInfo', 'CallSetupAccessNetworkInfo',
         'CallSetupDomain', 'CallSetupUserPerceivedCallSetupTime',
         'CallEstablishedUserCallEstablishedTime', 'CallEstablishedCallAnswerDelay',
         'BearerTechnology',
-        'CallDroppedDateTime',  # FIX: existía en SQL Server y parquet, pero se descartaba
-        'CallBlockedDateTime',  # FIX: ídem
+        'CallDroppedDateTime',  # FIX 2026-03-20
+        'CallBlockedDateTime',  # FIX 2026-03-20
     ]
     existing = [c for c in required_columns if c in df.columns]
     df = df[existing].copy()
@@ -189,7 +214,7 @@ def _process_table3(df):
         'CallInitiationDateTime', 'CallEndDateTime',
         'EutranReselectionTimeAfterCsfbCallDateTime',
         'CallAttemptDateTime', 'CallBlockedDateTime', 'CallReestablishedDateTime',
-        'CallDroppedDateTime',  # FIX: asegurar conversión de tipo
+        'CallDroppedDateTime',
     ]
     for col in datetime_cols:
         if col in df.columns:
@@ -218,7 +243,8 @@ def _process_table3(df):
         if col in df.columns:
             df[col] = df[col].apply(convertir_a_duracion)
 
-    for col in ['AqmSessionEndAqmCallQuality', 'AqmSessionEndAqmCallQualityDownlink']:
+    for col in ['AqmSessionEndAqmCallQuality', 'AqmSessionEndAqmCallQualityDownlink',
+                'AqmSessionEndAqmCallQualityUplink']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
@@ -227,62 +253,17 @@ def _process_table3(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
 
+    if 'CallDirection' in df.columns:
+        print(f"  CallDirection distribución: {df['CallDirection'].value_counts().to_dict()}")
+    if 'DialEndServiceStatus' in df.columns:
+        print(f"  DialEndServiceStatus distribución: {df['DialEndServiceStatus'].value_counts().to_dict()}")
+
     print(f"  table3 lista: {len(df):,} filas")
     return df
 
 
 # ---------------------------------------------------------------------------
-# table4 — igual que main_voice.py EXCEPTO: sin dropna de coordenadas
-# ---------------------------------------------------------------------------
-
-def _process_table4_raw(df):
-    """
-    Normaliza SessionVoiceQuality sin eliminar coordenadas nulas.
-    main_voice.py hace dropna(['EndLatitude','EndLongitude']). Aquí se conservan.
-    """
-    print("Procesando SessionVoiceQuality (raw — conserva coordenadas nulas)...")
-
-    required_columns = [
-        'DatasourceId', 'CallIndex', 'SentenceIndex',
-        'StartDateTime', 'EndDateTime', 'EndLatitude', 'EndLongitude',
-        'AqmScoreAny', 'AqmScoreDownlink', 'AqmScoreUplink',
-        'SpeechCodec', 'AqmAlgorithmDownlink', 'AqmAlgorithmUplink',
-    ]
-    existing = [c for c in required_columns if c in df.columns]
-    df = df[existing].copy()
-
-    dup_cols = [c for c in [
-        'DatasourceId', 'StartDateTime', 'EndDateTime',
-        'EndLatitude', 'EndLongitude', 'EndRadioTechnology',
-    ] if c in df.columns]
-    if dup_cols:
-        before = len(df)
-        df = df.drop_duplicates(subset=dup_cols, keep='first')
-        print(f"  Dedup table4: {before:,} → {len(df):,}")
-
-    for col in ['DatasourceId']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-    for col in ['StartDateTime', 'EndDateTime']:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce',
-                                     format='%Y-%m-%d %H:%M:%S.%f')
-    for col in ['EndLatitude', 'EndLongitude']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-    for col in ['AqmScoreAny', 'AqmScoreDownlink', 'AqmScoreUplink']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-
-    null_coords = (df[['EndLatitude', 'EndLongitude']].isna().any(axis=1).sum()
-                   if 'EndLatitude' in df.columns else 0)
-    print(f"  table4 raw lista: {len(df):,} filas "
-          f"(coords nulas conservadas: {null_coords:,})")
-    return df
-
-
-# ---------------------------------------------------------------------------
-# sense_nacional — idéntico a main_voice.py
+# sense_nacional
 # ---------------------------------------------------------------------------
 
 def _process_sense_nacional(df):
@@ -293,59 +274,67 @@ def _process_sense_nacional(df):
 
 
 # ---------------------------------------------------------------------------
-# Merge raw — igual que main_voice.py EXCEPTO: sin dropna final
+# Merge raw — table3 como BASE
 # ---------------------------------------------------------------------------
 
 def process_raw_voice_data(dataframes, chunk_size=8_000):
     """
-    Merge y normalización SIN dropna de coordenadas ni filtro de CallDirection.
-    Secuencia de merges idéntica a main_voice.py.
+    Merge con table3 (SessionSummaryVoice) como base.
+
+    Orden:
+      MERGE 1: table3 + table1  on [DatasourceId, CallIndex]  (chunks)
+      MERGE 2: resultado + sense_nacional  on [IMSI, IMEI]
+
+    SIN dropna — todas las llamadas son datos regulatorios válidos.
     """
-    print("🚀 INICIANDO PROCESO RAW VOICE (sin filtrado de nulos)")
+    print("🚀 INICIANDO PROCESO RAW VOICE (table3 como base)")
     print("=" * 70)
 
     df1 = dataframes['table1'].copy()
-    df2 = dataframes['table3'].copy()
-    df3 = dataframes['table4'].copy()
+    df3 = dataframes['table3'].copy()
     df4 = dataframes['sense_nacional'].copy()
     del dataframes
     gc.collect()
 
     print(f"Table1 (SessionSummary)      : {df1.shape}")
-    print(f"Table3 (SessionSummaryVoice) : {df2.shape}")
-    print(f"Table4 (SessionVoiceQuality) : {df3.shape}  ← tabla más grande")
+    print(f"Table3 (SessionSummaryVoice) : {df3.shape}  ← base")
     print(f"sense_nacional               : {df4.shape}")
 
     try:
         # PASO 1: normalización
         print("\n📞 PASO 1: Normalizando tipos...")
         df1 = _process_table1_raw(df1)
-        df2 = _process_table3(df2)
-        df3 = _process_table4_raw(df3)
+        df3 = _process_table3(df3)
         df4 = _process_sense_nacional(df4)
 
-        if df3.empty or df2.empty:
-            raise ValueError("❌ Una tabla de origen quedó vacía tras normalización")
+        if df3.empty:
+            raise ValueError("❌ Table3 (SessionSummaryVoice) vacía tras normalización")
+        if df1.empty:
+            raise ValueError("❌ Table1 (SessionSummary) vacía tras normalización")
 
-        # PASO 2: merge en chunks df3 + df2 (idéntico a main_voice.py)
-        # main_voice.py: chunk_df3.merge(df2, on=['DatasourceId','CallIndex'], how='left')
-        print("\n📊 PASO 2: Merge df3 + df2 en chunks (VoiceQuality + SessionSummaryVoice)...")
-        merge_cols_32 = ['DatasourceId', 'CallIndex']
+        # PASO 2: merge en chunks table3 (base) + table1
+        print("\n📊 PASO 2: Merge table3 (base) + table1 en chunks...")
+        print(f"  Merge key: [DatasourceId, CallIndex]")
+
+        merge_cols = ['DatasourceId', 'CallIndex']
         processed_chunks = []
         num_chunks = len(df3) // chunk_size + (1 if len(df3) % chunk_size else 0)
         failed_chunks = 0
+
+        print(f"  {len(df3):,} registros en {num_chunks} chunks de {chunk_size:,}")
 
         for i in range(0, len(df3), chunk_size):
             chunk_num = i // chunk_size + 1
             chunk_df3 = df3.iloc[i: i + chunk_size].copy()
             try:
-                on_cols = [c for c in merge_cols_32
-                           if c in chunk_df3.columns and c in df2.columns]
-                chunk_merged = chunk_df3.merge(df2, on=on_cols, how='left',
-                                               suffixes=('', '_df2'))
+                on_cols = [c for c in merge_cols
+                           if c in chunk_df3.columns and c in df1.columns]
+                chunk_merged = chunk_df3.merge(df1, on=on_cols, how='left',
+                                               suffixes=('', '_df1'))
                 if len(chunk_merged) > 0:
                     processed_chunks.append(chunk_merged)
-                print(f"  Chunk {chunk_num}/{num_chunks}: {len(chunk_merged):,} filas")
+                print(f"  Chunk {chunk_num}/{num_chunks}: "
+                      f"{len(chunk_df3):,} → {len(chunk_merged):,} filas")
             except Exception as e:
                 failed_chunks += 1
                 print(f"  ⚠️ Error chunk {chunk_num}: {e}")
@@ -358,51 +347,49 @@ def process_raw_voice_data(dataframes, chunk_size=8_000):
         if not processed_chunks:
             raise ValueError("❌ Ningún chunk procesado exitosamente")
 
-        df3_2_merged = pd.concat(processed_chunks, ignore_index=True)
-        del processed_chunks, df3, df2
+        df3_1_merged = pd.concat(processed_chunks, ignore_index=True)
+        del processed_chunks, df3, df1
         gc.collect()
-        print(f"✅ Tras merge 1: {len(df3_2_merged):,} filas")
+        print(f"✅ Tras merge 1: {len(df3_1_merged):,} filas")
 
-        # PASO 3: merge resultado + df1 (idéntico a main_voice.py)
-        print("\n📞 PASO 3: Merge resultado + SessionSummary (DatasourceId + CallIndex)...")
-        if 'SessionIdOrCallIndex' in df1.columns:
-            df1 = df1.rename(columns={'SessionIdOrCallIndex': 'CallIndex'})
-            merge_cols_12 = ['DatasourceId', 'CallIndex']
-        else:
-            merge_cols_12 = ['DatasourceId']
+        # PASO 3: merge resultado + sense_nacional
+        print("\n📱 PASO 3: Merge resultado + sense_nacional (IMSI + IMEI)...")
+        dataset_final = df3_1_merged.merge(df4, on=['IMSI', 'IMEI'], how='left',
+                                           suffixes=('', '_df4'))
+        print(f"✅ Tras merge 2 (final): {len(dataset_final):,} filas")
 
-        df3_2_1_merged = df3_2_merged.merge(df1, on=merge_cols_12, how='left',
-                                            suffixes=('', '_df1'))
-        print(f"✅ Tras merge 2: {len(df3_2_1_merged):,} filas")
-
-        del df3_2_merged, df1
+        del df3_1_merged, df4
         gc.collect()
 
-        # PASO 4: merge resultado + sense_nacional (idéntico a main_voice.py)
-        print("\n📱 PASO 4: Merge resultado + sense_nacional (IMSI + IMEI)...")
-        dataset_final = df3_2_1_merged.merge(df4, on=['IMSI', 'IMEI'], how='left',
-                                             suffixes=('', '_df4'))
-        print(f"✅ Tras merge 3 (final): {len(dataset_final):,} filas")
+        # SIN dropna
+        print("\n✅ Sin filtrado de coordenadas ni estado (raw regulatorio completo)")
 
-        del df3_2_1_merged, df4
-        gc.collect()
-
-        # SIN dropna final — coordenadas nulas son datos regulatorios válidos
-        print("\n✅ Sin filtrado de coordenadas (raw — datos regulatorios completos)")
-
+        # Resumen de métricas críticas
         print(f"\n🎯 RESUMEN FINAL")
         print("=" * 70)
-        print(f"📊 Dataset final: {len(dataset_final):,} filas × {len(dataset_final.columns)} columnas")
+        print(f"📊 Dataset: {len(dataset_final):,} filas × {len(dataset_final.columns)} columnas")
+        print(f"\n📋 VERIFICACIÓN COLUMNAS CRÍTICAS:")
 
-        # Resumen de columnas de interés para métricas de voz
-        for col in ['CallAttemptDateTime', 'CallDroppedDateTime',
-                    'CallBlockedDateTime', 'CallEstablishedDateTime',
-                    'DialEndServiceStatus']:
+        for col in [
+            'CallAttemptDateTime', 'CallDroppedDateTime', 'CallBlockedDateTime',
+            'CallEstablishedDateTime', 'DialEndServiceStatus',
+            'SimOperator', 'StartTime', 'EndTime',
+            'AqmSessionEndAqmCallQuality',
+            'AqmSessionEndAqmCallQualityDownlink',
+            'AqmSessionEndAqmCallQualityUplink',
+        ]:
             if col in dataset_final.columns:
                 non_null = dataset_final[col].notna().sum()
-                print(f"   {col}: {non_null:,} no-nulos ({non_null / len(dataset_final) * 100:.1f}%)")
+                pct = non_null / len(dataset_final) * 100 if len(dataset_final) > 0 else 0
+                print(f"   {col}: {non_null:,} no-nulos ({pct:.1f}%)")
             else:
-                print(f"   ⚠️  {col}: columna no presente en dataset final")
+                print(f"   ⚠️  {col}: columna NO presente en dataset final")
+
+        if 'DialEndServiceStatus' in dataset_final.columns:
+            print(f"\n   DialEndServiceStatus distribución:")
+            dist = dataset_final['DialEndServiceStatus'].value_counts(dropna=False)
+            for val, cnt in dist.items():
+                print(f"     {val}: {cnt:,}")
 
         return dataset_final
 
@@ -421,6 +408,8 @@ def validate_raw_voice_data(df):
         raise ValueError("Dataset raw de voz vacío")
     if 'DatasourceId' not in df.columns or df['DatasourceId'].isnull().all():
         raise ValueError("DatasourceId ausente o completamente nulo")
+    if 'DialEndServiceStatus' not in df.columns:
+        raise ValueError("DialEndServiceStatus ausente — métricas de voz no disponibles")
     print(f"✅ Validación raw voz OK: {len(df):,} filas × {len(df.columns)} columnas")
     return True
 
@@ -430,7 +419,7 @@ def validate_raw_voice_data(df):
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Iniciando ETL de datos de voz CRUDOS...")
+    print("Iniciando ETL de datos de voz CRUDOS (table3 como base)...")
 
     postgres_handler = get_postgres_handler(
         host=get_env_var('POSTGRES_HOST'),
