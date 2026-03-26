@@ -529,6 +529,12 @@ def validate_voice_data(df):
     return True
 
 
+def _is_empty_data_error(exc: Exception) -> bool:
+    """Devuelve True si la excepción indica simplemente que no hay datos en el período."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("empty", "is empty", "vac", "no data", "0 records"))
+
+
 def main():
     print("Iniciando proceso ETL de datos de voz...")
 
@@ -548,13 +554,28 @@ def main():
     try:
         print("Cargando datos de voz pre-extraídos...")
         dataframes = load_voice_data()
-
         if dataframes is None:
-            print("Error: No se pudieron cargar los datos de voz")
+            print("⚠️  SKIP [process_voice_data]: Archivos parquet de voz no encontrados.")
+            print("   Causa probable: el período de extracción no generó datos (SQL devolvió 0 filas).")
+            print("   El pipeline continúa — no hay nuevos registros de voz para procesar.")
             return
 
-        processed_voice_data = process_voice_data_chunked(dataframes, chunk_size=8000)
-        validate_voice_data(processed_voice_data)
+        try:
+            processed_voice_data = process_voice_data_chunked(dataframes)
+        except ValueError as exc:
+            if _is_empty_data_error(exc):
+                print(f"⚠️  SKIP [process_voice_data]: {exc}")
+                print("   No hay datos procesables en este período. Omitiendo almacenamiento.")
+                return
+            raise
+
+        try:
+            validate_voice_data(processed_voice_data)
+        except ValueError as exc:
+            if _is_empty_data_error(exc):
+                print(f"⚠️  SKIP [process_voice_data]: {exc}")
+                return
+            raise
 
         print("Storing voice data in PostgreSQL...")
         postgres_handler.upsert_voice_measurements(processed_voice_data)

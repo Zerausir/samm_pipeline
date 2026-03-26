@@ -336,7 +336,13 @@ def load_datasource():
 
     # 1. Cargar fuentes
     print("\n📂 PASO 1: Cargando archivos...")
-    df_ds = _load_datasource_parquet(data_dir)
+    try:
+        df_ds = _load_datasource_parquet(data_dir)
+    except FileNotFoundError as exc:
+        print(f"⚠️  SKIP [load_datasource]: {exc}")
+        print("   Causa probable: extract_data_datasource.py no se ejecutó o no generó datos.")
+        print("   El pipeline continúa — datasource_phones no será actualizado en este ciclo.")
+        return
     df_sense = _load_sense_nacional(data_dir)
 
     # 2. Merge con sense_nacional para Device + CZO

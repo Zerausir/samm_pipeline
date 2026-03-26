@@ -397,6 +397,12 @@ def validate_raw_mobile_data(df):
     return True
 
 
+def _is_empty_data_error(exc: Exception) -> bool:
+    """Devuelve True si la excepción indica simplemente que no hay datos en el período."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("empty", "is empty", "vac", "no data", "0 records"))
+
+
 # ---------------------------------------------------------------------------
 # Punto de entrada
 # ---------------------------------------------------------------------------
@@ -418,10 +424,27 @@ def main():
 
     dataframes = load_mobile_data()
     if dataframes is None:
-        raise RuntimeError("No se pudieron cargar los datos móviles")
+        print("⚠️  SKIP [process_raw_mobile_data]: Archivos parquet de datos móviles no encontrados.")
+        print("   Causa probable: el período de extracción no generó datos (SQL devolvió 0 filas).")
+        print("   El pipeline continúa — no hay nuevos registros raw móviles para procesar.")
+        return
 
-    processed = process_raw_mobile_data(dataframes)
-    validate_raw_mobile_data(processed)
+    try:
+        processed = process_raw_mobile_data(dataframes)
+    except ValueError as exc:
+        if _is_empty_data_error(exc):
+            print(f"⚠️  SKIP [process_raw_mobile_data]: {exc}")
+            print("   No hay datos procesables en este período. Omitiendo almacenamiento.")
+            return
+        raise
+
+    try:
+        validate_raw_mobile_data(processed)
+    except ValueError as exc:
+        if _is_empty_data_error(exc):
+            print(f"⚠️  SKIP [process_raw_mobile_data]: {exc}")
+            return
+        raise
 
     print("Almacenando datos móviles raw en PostgreSQL...")
     postgres_handler.upsert_raw_measurements(processed)

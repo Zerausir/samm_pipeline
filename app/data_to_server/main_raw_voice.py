@@ -414,6 +414,12 @@ def validate_raw_voice_data(df):
     return True
 
 
+def _is_empty_data_error(exc: Exception) -> bool:
+    """Devuelve True si la excepción indica simplemente que no hay datos en el período."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("empty", "is empty", "vac", "no data", "0 records"))
+
+
 # ---------------------------------------------------------------------------
 # Punto de entrada
 # ---------------------------------------------------------------------------
@@ -435,10 +441,27 @@ def main():
 
     dataframes = load_voice_data()
     if dataframes is None:
-        raise RuntimeError("No se pudieron cargar los datos de voz")
+        print("⚠️  SKIP [process_raw_voice_data]: Archivos parquet de voz no encontrados.")
+        print("   Causa probable: el período de extracción no generó datos (SQL devolvió 0 filas).")
+        print("   El pipeline continúa — no hay nuevos registros raw de voz para procesar.")
+        return
 
-    processed = process_raw_voice_data(dataframes)
-    validate_raw_voice_data(processed)
+    try:
+        processed = process_raw_voice_data(dataframes)
+    except ValueError as exc:
+        if _is_empty_data_error(exc):
+            print(f"⚠️  SKIP [process_raw_voice_data]: {exc}")
+            print("   No hay datos procesables en este período. Omitiendo almacenamiento.")
+            return
+        raise
+
+    try:
+        validate_raw_voice_data(processed)
+    except ValueError as exc:
+        if _is_empty_data_error(exc):
+            print(f"⚠️  SKIP [process_raw_voice_data]: {exc}")
+            return
+        raise
 
     print("Almacenando datos de voz raw en PostgreSQL...")
     postgres_handler.upsert_raw_voice_measurements(processed)

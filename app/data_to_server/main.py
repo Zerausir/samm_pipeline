@@ -634,6 +634,12 @@ def validate_mobile_data(df):
     return True
 
 
+def _is_empty_data_error(exc: Exception) -> bool:
+    """Devuelve True si la excepción indica simplemente que no hay datos en el período."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("empty", "is empty", "vac", "no data", "0 records"))
+
+
 def main():
     print("Iniciando proceso ETL...")
 
@@ -662,14 +668,29 @@ def main():
         dataframes = load_mobile_data()
 
         if dataframes is None:
-            print("Error: No se pudieron cargar los datos móviles")
+            print("⚠️  SKIP [process_mobile_data]: Archivos parquet de datos móviles no encontrados.")
+            print("   Causa probable: el período de extracción no generó datos (SQL devolvió 0 filas).")
+            print("   El pipeline continúa — no hay nuevos registros móviles para procesar.")
             return
 
         # Process mobile data - EXACTLY like data_analysis_code.ipynb
-        processed_mobile_data = process_mobile_data(dataframes)
+        try:
+            processed_mobile_data = process_mobile_data(dataframes)
+        except ValueError as exc:
+            if _is_empty_data_error(exc):
+                print(f"⚠️  SKIP [process_mobile_data]: {exc}")
+                print("   No hay datos procesables en este período. Omitiendo almacenamiento.")
+                return
+            raise
 
         # Validate processed data
-        validate_mobile_data(processed_mobile_data)
+        try:
+            validate_mobile_data(processed_mobile_data)
+        except ValueError as exc:
+            if _is_empty_data_error(exc):
+                print(f"⚠️  SKIP [process_mobile_data]: {exc}")
+                return
+            raise
 
         # Store mobile data in PostgreSQL
         print("Storing mobile data in PostgreSQL...")
