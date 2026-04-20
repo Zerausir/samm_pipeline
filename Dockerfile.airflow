@@ -1,8 +1,8 @@
-FROM apache/airflow:2.7.3-python3.11
+FROM apache/airflow:slim-3.2.0-python3.14
 
 USER root
 
-# Instalar dependencias del sistema para geopandas y otras bibliotecas
+# Dependencias del sistema para geopandas y librerías geoespaciales
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -15,8 +15,9 @@ RUN apt-get update \
 
 USER airflow
 
-# Instalar dependencias de Python
+# Dependencias Python — numpy pinneado explícitamente por seguridad
 RUN pip install --no-cache-dir \
+    "numpy==2.4.4" \
     "marshmallow>=3.13.0,<4.0.0" \
     psycopg2-binary \
     geopandas \
@@ -26,10 +27,9 @@ RUN pip install --no-cache-dir \
     pykml \
     shapely \
     pandas \
-    numpy \
     sqlalchemy \
     fiona \
-    pyproj
+    pyproj \
+    pyarrow
 
-# Volvemos al entrypoint de la imagen original
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]
