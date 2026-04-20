@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
 default_args = {
     'owner': 'ivan',
@@ -16,7 +16,7 @@ with DAG(
         'superset_etl_pipeline',
         default_args=default_args,
         description='Pipeline secuencial completo para procesar datos móviles y de voz para visualización en PowerBI y Grafana',
-        schedule_interval='0 9,14 * * *',  # Ejecutar a las 9:00 y 14:00 diariamente
+        schedule='0 9,14 * * *',  # ← schedule_interval → schedule
         catchup=False,
         tags=['etl', 'powerbi', 'grafana', 'mobile', 'voice', 'sequential']
 ) as dag:

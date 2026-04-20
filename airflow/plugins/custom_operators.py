@@ -1,5 +1,4 @@
-from airflow.models.baseoperator import BaseOperator
-from airflow.utils.decorators import apply_defaults
+from airflow.sdk.bases.operator import BaseOperator
 import subprocess
 import os
 
@@ -12,7 +11,6 @@ class WindowsServiceOperator(BaseOperator):
     :param action: Acción a realizar (start, stop, restart)
     """
 
-    @apply_defaults
     def __init__(self, service_name, action='start', *args, **kwargs):
         super(WindowsServiceOperator, self).__init__(*args, **kwargs)
         self.service_name = service_name
@@ -24,12 +22,10 @@ class WindowsServiceOperator(BaseOperator):
 
         try:
             if self.action == 'restart':
-                # Para reiniciar, primero detener y luego iniciar
                 subprocess.run(['net', 'stop', self.service_name], check=True)
                 subprocess.run(['net', 'start', self.service_name], check=True)
                 self.log.info(f"Servicio {self.service_name} reiniciado con éxito")
             else:
-                # Iniciar o detener
                 subprocess.run(['net', self.action, self.service_name], check=True)
                 self.log.info(f"Servicio {self.service_name} {self.action}ado con éxito")
 

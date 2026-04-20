@@ -1,4 +1,4 @@
-from airflow.hooks.base import BaseHook
+from airflow.sdk.bases.hook import BaseHook
 import psycopg2
 from psycopg2.extras import RealDictCursor
 

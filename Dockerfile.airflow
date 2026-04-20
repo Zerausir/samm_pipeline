@@ -18,18 +18,14 @@ USER airflow
 # Dependencias Python — numpy pinneado explícitamente por seguridad
 RUN pip install --no-cache-dir \
     "numpy==2.4.4" \
-    "marshmallow>=3.13.0,<4.0.0" \
-    psycopg2-binary \
-    geopandas \
-    pyodbc \
-    environs \
-    openpyxl \
-    pykml \
-    shapely \
-    pandas \
-    sqlalchemy \
-    fiona \
-    pyproj \
-    pyarrow
+    "asyncpg==0.31.0" \
+    "psycopg2-binary==2.9.11" \
+    "geopandas==1.1.3" \
+    "pyodbc==5.3.0" \
+    "environs==15.0.1" \
+    "openpyxl==3.1.5" \
+    "pykml==0.2.0" \
+    "sqlalchemy==2.0.49" \
+    "pyarrow==23.0.1"
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--", "/entrypoint"]
