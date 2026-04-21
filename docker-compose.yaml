@@ -11,6 +11,8 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__DEFAULT_TIMEZONE: 'America/Guayaquil'
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: '${_AIRFLOW_WWW_USER_USERNAME}:admin'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: '${AIRFLOW__API_AUTH__JWT_SECRET}'
     # Timeouts para tareas largas
     AIRFLOW__CORE__TASK_TIMEOUT: 900
     AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 300
@@ -26,6 +28,9 @@ x-airflow-common:
     POSTGRES_DB: ${POSTGRES_DB}
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Rutas de archivos estáticos (dentro del contenedor)
+    sense_file: '/opt/airflow/app/data/sense_nacional_v0.xlsx'
+    geojson_route: '/opt/airflow/app/data/states'
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs

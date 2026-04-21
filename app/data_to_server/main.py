@@ -51,7 +51,16 @@ def load_mobile_data():
     for table_name in ['table1', 'table2']:
         try:
             print(f"Reading file: {mobile_files[table_name]}")
-            df = pd.read_parquet(mobile_files[table_name])
+            df = pd.read_parquet(mobile_files[table_name], dtype_backend='numpy_nullable')
+            # Convertir todos los tipos nullable a numpy/object para compatibilidad con .loc y psycopg2
+            str_cols = [c for c in df.columns if str(df[c].dtype) == 'string']
+            float_cols = [c for c in df.columns if str(df[c].dtype) == 'Float64']
+            int_cols = [c for c in df.columns if str(df[c].dtype) in ('Int64', 'Int32', 'Int16', 'Int8')]
+            bool_cols = [c for c in df.columns if str(df[c].dtype) == 'boolean']
+            if str_cols:   df[str_cols] = df[str_cols].astype(object)
+            if float_cols: df[float_cols] = df[float_cols].astype('float64')
+            if int_cols:   df[int_cols] = df[int_cols].astype('float64')
+            if bool_cols:  df[bool_cols] = df[bool_cols].astype(object)
             dataframes[table_name] = df
             print(f"Loaded {table_name}: {len(df)} records")
         except Exception as e:
@@ -142,11 +151,11 @@ def _process_table1_session_summary(df):
         if 'IpAddress' in df.columns:
             def convertir_ip(ip):
                 try:
-                    return ipaddress.ip_address(ip)
+                    return str(ipaddress.ip_address(ip))
                 except:
                     return None
 
-            df.loc[:, 'IpAddress'] = df['IpAddress'].apply(convertir_ip)
+            df['IpAddress'] = df['IpAddress'].apply(convertir_ip)
 
         return df
 
@@ -247,7 +256,7 @@ def _process_table2_session_summary_data(df):
         # Convert int columns to Int64 using .loc
         int_columns = [
             'DatasourceId', 'SessionId', 'StartSampleId', 'EndSampleId',
-            'ErrorSampleId', 'MultiRab', 'ErrorErrorCauseSubCause',
+            'ErrorSampleId', 'ErrorErrorCauseSubCause',
             'IsTimeBasedMeasurement', 'IPServiceSetupTimeMethodASampleId',
             'IPServiceSetupTimeMethodBSampleId', 'ServiceAccessStartRnceNodeB',
             'ServiceAccessStartSectorCell', 'ServiceAccessStartPciSC',
@@ -267,12 +276,11 @@ def _process_table2_session_summary_data(df):
             'MaxEpsServingCellCount', 'DNSResolutionStartRnceNodeB',
             'DNSResolutionStartSectorCell', 'DNSResolutionStartPciSC',
             'DNSResolutionStartLacTac', 'SessionEndRnceNodeB', 'SessionEndSectorCell',
-            'SessionEndPciSC', 'SessionEndLacTac', 'CarrierAggregation',
-            'CarrierAggregationUplink', 'KbyteCountLte', 'KbyteCountNr'
+            'SessionEndPciSC', 'SessionEndLacTac', 'KbyteCountLte', 'KbyteCountNr'
         ]
         for col in int_columns:
             if col in df.columns:
-                df.loc[:, col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
         return df
 
@@ -300,7 +308,7 @@ def _process_sense_nacional(df):
 
 def calculate_throughput(row):
     """Calculate throughput using timedelta - more robust and semantically correct"""
-    if (row['EndFileSize'] != 0 and
+    if (pd.notna(row['EndFileSize']) and row['EndFileSize'] != 0 and
             row['EndServiceStatus'] == 'Succeeded' and
             pd.notna(row['DataTransferTimeMethodADuration'])):
 

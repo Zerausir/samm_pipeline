@@ -58,8 +58,17 @@ def load_mobile_data():
     for key in ['table1', 'table2']:
         try:
             print(f"Leyendo: {mobile_files[key]}")
-            dataframes[key] = pd.read_parquet(mobile_files[key])
-            print(f"  {key}: {len(dataframes[key]):,} registros")
+            df = pd.read_parquet(mobile_files[key], dtype_backend='numpy_nullable')
+            str_cols = [c for c in df.columns if str(df[c].dtype) == 'string']
+            float_cols = [c for c in df.columns if str(df[c].dtype) == 'Float64']
+            int_cols = [c for c in df.columns if str(df[c].dtype) in ('Int64', 'Int32', 'Int16', 'Int8')]
+            bool_cols = [c for c in df.columns if str(df[c].dtype) == 'boolean']
+            if str_cols:   df[str_cols] = df[str_cols].astype(object)
+            if float_cols: df[float_cols] = df[float_cols].astype('float64')
+            if int_cols:   df[int_cols] = df[int_cols].astype('float64')
+            if bool_cols:  df[bool_cols] = df[bool_cols].astype(object)
+            dataframes[key] = df
+            print(f"  {key}: {len(df):,} registros")
         except Exception as e:
             print(f"Error cargando {mobile_files[key]}: {e}")
             return None
@@ -116,11 +125,11 @@ def _process_table1_raw(df):
         if 'IpAddress' in df.columns:
             def convertir_ip(ip):
                 try:
-                    return ipaddress.ip_address(ip)
+                    return str(ipaddress.ip_address(ip))
                 except Exception:
                     return None
 
-            df.loc[:, 'IpAddress'] = df['IpAddress'].apply(convertir_ip)
+            df['IpAddress'] = df['IpAddress'].apply(convertir_ip)
 
         if 'SessionType' in df.columns:
             print(f"  SessionType distribución: {df['SessionType'].value_counts().to_dict()}")
@@ -213,7 +222,7 @@ def _process_table2(df):
 
         int_cols = [
             'DatasourceId', 'SessionId', 'StartSampleId', 'EndSampleId',
-            'ErrorSampleId', 'MultiRab', 'ErrorErrorCauseSubCause',
+            'ErrorSampleId', 'ErrorErrorCauseSubCause',
             'IsTimeBasedMeasurement', 'IPServiceSetupTimeMethodASampleId',
             'IPServiceSetupTimeMethodBSampleId', 'ServiceAccessStartRnceNodeB',
             'ServiceAccessStartSectorCell', 'ServiceAccessStartPciSC',
@@ -233,12 +242,11 @@ def _process_table2(df):
             'DNSResolutionStartRnceNodeB', 'DNSResolutionStartSectorCell',
             'DNSResolutionStartPciSC', 'DNSResolutionStartLacTac',
             'SessionEndRnceNodeB', 'SessionEndSectorCell', 'SessionEndPciSC',
-            'SessionEndLacTac', 'CarrierAggregation', 'CarrierAggregationUplink',
-            'KbyteCountLte', 'KbyteCountNr',
+            'SessionEndLacTac', 'KbyteCountLte', 'KbyteCountNr',
         ]
         for col in int_cols:
             if col in df.columns:
-                df.loc[:, col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+                df.loc[:, col] = pd.to_numeric(df[col], errors='coerce').astype(float)
 
         return df
 
