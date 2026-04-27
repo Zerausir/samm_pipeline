@@ -13,10 +13,11 @@ Cambios respecto a la versión original:
        - Reemplazado df.iterrows() por df.itertuples() (~5x más rápido).
   4. create_raw_tables / upsert_raw_measurements / upsert_raw_voice_measurements:
        - Nuevas tablas mobile_raw_measurements y voice_raw_measurements.
-       - Almacenan datos regulatorios completos (sin dropna de coordenadas
-         ni throughput) para los dashboards de Grafana.
-       - Reutilizan el motor _upsert_dataframe() y _batch_add_columns() existentes.
-  5. Resto de la lógica preservada sin cambios.
+  5. create_tables:
+       - Simplificado para crear únicamente geographic_regions.
+       - mobile_measurements y voice_measurements eliminadas — no se usan
+         en el pipeline raw-only.
+  6. Resto de la lógica preservada sin cambios.
 """
 
 import datetime
@@ -76,17 +77,7 @@ class PostgresDataHandler:
     # ------------------------------------------------------------------
 
     def create_tables(self):
-        """Create clean tables and indexes if they don't exist."""
-        mobile_measurements_table = """
-            CREATE TABLE IF NOT EXISTS mobile_measurements (
-                measurement_id VARCHAR PRIMARY KEY,
-                valid_from TIMESTAMP NOT NULL,
-                valid_to TIMESTAMP,
-                is_current INTEGER DEFAULT 1,
-                batch_id VARCHAR,
-                ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """
+        """Create geographic_regions table and indexes if they don't exist."""
         geographic_table = """
             CREATE TABLE IF NOT EXISTS geographic_regions (
                 region_id VARCHAR PRIMARY KEY,
@@ -105,28 +96,6 @@ class PostgresDataHandler:
                 ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """
-        voice_measurements_table = """
-            CREATE TABLE IF NOT EXISTS voice_measurements (
-                measurement_id VARCHAR PRIMARY KEY,
-                valid_from TIMESTAMP NOT NULL,
-                valid_to TIMESTAMP,
-                is_current INTEGER DEFAULT 1,
-                batch_id VARCHAR,
-                ingestion_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """
-        mobile_indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_mobile_batch_id ON mobile_measurements(batch_id);",
-            "CREATE INDEX IF NOT EXISTS idx_mobile_valid_from ON mobile_measurements(valid_from);",
-            "CREATE INDEX IF NOT EXISTS idx_mobile_is_current ON mobile_measurements(is_current);",
-            "CREATE INDEX IF NOT EXISTS idx_mobile_ingestion ON mobile_measurements(ingestion_timestamp);",
-        ]
-        voice_indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_voice_batch_id ON voice_measurements(batch_id);",
-            "CREATE INDEX IF NOT EXISTS idx_voice_valid_from ON voice_measurements(valid_from);",
-            "CREATE INDEX IF NOT EXISTS idx_voice_is_current ON voice_measurements(is_current);",
-            "CREATE INDEX IF NOT EXISTS idx_voice_ingestion ON voice_measurements(ingestion_timestamp);",
-        ]
         geographic_indexes = [
             "CREATE INDEX IF NOT EXISTS idx_geo_batch_id ON geographic_regions(batch_id);",
             "CREATE INDEX IF NOT EXISTS idx_geo_valid_from ON geographic_regions(valid_from);",
@@ -138,10 +107,8 @@ class PostgresDataHandler:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(mobile_measurements_table)
                     cur.execute(geographic_table)
-                    cur.execute(voice_measurements_table)
-                    for index_query in mobile_indexes + voice_indexes + geographic_indexes:
+                    for index_query in geographic_indexes:
                         try:
                             cur.execute(index_query)
                         except psycopg2.Error as e:

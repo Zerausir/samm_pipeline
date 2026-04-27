@@ -95,7 +95,7 @@ class SpatialMapper:
         """
         Process both mobile and voice CLEAN tables in one call.
         Shared geometry cache avoids double DB load.
-        Used by: update_mapping.py (paso 6 del DAG).
+        Used by: previous version of update mapping.
         """
         print("=== 🗺️  Iniciando mapeo espacial para datos CLEAN ===")
         mobile_count = self.process_and_map_locations()

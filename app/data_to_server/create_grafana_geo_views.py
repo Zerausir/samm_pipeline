@@ -10,7 +10,6 @@ Fuente de datos:
 Por qué raw y no las vistas PowerBI (data_dashboard_view_visualization):
   Los dashboards de Grafana necesitan TODOS los datos regulatorios, incluyendo
   sesiones fallidas con coordenadas nulas (representan red que no respondió).
-  Las vistas PowerBI ya eliminaron esas filas (dropna en main.py / main_voice.py).
 
 Filtros aplicados EN LA VISTA (no en la tabla):
   grafana_mobile_geo_view  →  "SessionType" IN ('HTTP Post', 'HTTP Download')
@@ -31,7 +30,7 @@ Dependencias (deben existir antes de ejecutar):
   - mobile_raw_measurements   (main_raw_mobile.py)
   - voice_raw_measurements    (main_raw_voice.py)
   - location_mapping          (update_raw_mapping.py)
-  - geographic_regions        (main.py, paso geográfico inicial)
+  - geographic_regions        (paso geográfico inicial)
   - datasource_phones         (load_datasource.py)
 
 Queries Grafana compatibles (PostgreSQL):

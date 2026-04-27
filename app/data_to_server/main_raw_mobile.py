@@ -3,7 +3,7 @@ main_raw_mobile.py
 ──────────────────
 ETL de datos móviles crudos → mobile_raw_measurements (regulatorio / Grafana).
 
-Diferencias respecto a main.py (PowerBI / analítico):
+Características:
   - Sin filtro de SessionType: se almacenan todos los tipos de sesión.
     La vista grafana_mobile_geo_view filtra HTTP Post / HTTP Download.
   - Sin dropna de coordenadas ni ThroughputMbps: sesiones fallidas o sin
@@ -38,7 +38,7 @@ def get_env_var(var_name, default=None):
 
 
 # ---------------------------------------------------------------------------
-# Carga de datos — idéntica a main.py
+# Carga de datos
 # ---------------------------------------------------------------------------
 
 def load_mobile_data():
@@ -85,13 +85,12 @@ def load_mobile_data():
 
 
 # ---------------------------------------------------------------------------
-# table1 — igual que main.py EXCEPTO: sin filtro de SessionType
+# table1 — sin filtro de SessionType
 # ---------------------------------------------------------------------------
 
 def _process_table1_raw(df):
     """
-    Normaliza SessionSummary sin filtrar por SessionType.
-    main.py filtra isin(['HTTP Download', 'HTTP Post']). Aquí se conservan todos.
+    Normaliza SessionSummary sin filtrar por SessionType. Aquí se conservan todos.
     """
     print("Procesando SessionSummary (raw — todos los SessionType)...")
 
@@ -142,11 +141,11 @@ def _process_table1_raw(df):
 
 
 # ---------------------------------------------------------------------------
-# table2 — idéntico a main.py (no tiene filtros ni dropna)
+# table2 — (no tiene filtros ni dropna)
 # ---------------------------------------------------------------------------
 
 def _process_table2(df):
-    """Normaliza SessionSummaryData — lógica idéntica a main.py."""
+    """Normaliza SessionSummaryData"""
     print("Procesando SessionSummaryData...")
 
     try:
@@ -255,7 +254,7 @@ def _process_table2(df):
 
 
 # ---------------------------------------------------------------------------
-# sense_nacional — idéntico a main.py
+# sense_nacional
 # ---------------------------------------------------------------------------
 
 def _process_sense_nacional(df):
@@ -269,7 +268,7 @@ def _process_sense_nacional(df):
 
 
 # ---------------------------------------------------------------------------
-# Throughput — idéntico a main.py
+# Throughput
 # ---------------------------------------------------------------------------
 
 def calculate_throughput(row):
@@ -286,13 +285,12 @@ def calculate_throughput(row):
 
 
 # ---------------------------------------------------------------------------
-# Merge raw — igual que main.py EXCEPTO: sin dropna final
+# Merge raw — sin dropna final
 # ---------------------------------------------------------------------------
 
 def process_raw_mobile_data(dataframes, chunk_size=10_000):
     """
     Merge y normalización SIN dropna de coordenadas ni ThroughputMbps.
-    Secuencia de merges idéntica a main.py.
     """
     print("🚀 INICIANDO PROCESO RAW MOBILE (sin filtrado de nulos)")
     print("=" * 70)
@@ -321,7 +319,7 @@ def process_raw_mobile_data(dataframes, chunk_size=10_000):
         if df1.empty or df2.empty:
             raise ValueError("❌ Una tabla de origen quedó vacía tras normalización")
 
-        # PASO 2: merge en chunks df2 + df1 (idéntico a main.py)
+        # PASO 2: merge en chunks df2 + df1
         print("\n📊 PASO 2: Merge df2 + df1 en chunks...")
         merge_columns = ['DatasourceId', 'SessionId', 'SessionType',
                          'StartTime', 'EndTime', 'EndServiceStatus']

@@ -3,7 +3,7 @@ main_raw_voice.py
 ─────────────────
 ETL de datos de voz crudos → voice_raw_measurements (regulatorio / Grafana).
 
-Diferencias respecto a main_voice.py (PowerBI / analítico):
+Características:
   - Sin filtro de SessionType en table1: se conservan todos (MO, MT, etc.).
     La vista grafana_voice_geo_view filtra CallDirection = 'MO'.
   - Sin dropna de coordenadas.
@@ -90,7 +90,7 @@ def load_voice_data():
 
 # ---------------------------------------------------------------------------
 # table1 — SessionSummary
-# Sin filtro de SessionType (main_voice.py filtra 'Voice MO')
+# Sin filtro de SessionType
 # ---------------------------------------------------------------------------
 
 def _process_table1_raw(df):

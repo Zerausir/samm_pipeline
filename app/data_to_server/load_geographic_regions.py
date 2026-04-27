@@ -5,17 +5,20 @@ Carga el shapefile de regiones geográficas del Ecuador en la tabla
 geographic_regions de PostgreSQL.
 
 La carga es idempotente:
-  - Si geographic_regions ya tiene datos (is_current = 1) → se omite.
+  - Si geographic_regions ya tiene datos (is_current = 1) → se omite sin error.
   - Si está vacía → carga el shapefile completo (1 081 parroquias).
 
 Esta operación se ejecuta una sola vez en el ciclo de vida del sistema
-o cuando se reinicia la base de datos desde cero.
+o cuando se reinicia la base de datos desde cero. En ejecuciones normales
+retorna en menos de un segundo tras verificar que la tabla ya tiene datos.
 
 Uso en DAG:
   Paso 1 — antes de process_raw_mobile_data.
 
 Variables de entorno requeridas:
   POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+
+Variables de entorno opcionales:
   SHAPEFILE_PATH  (default: /opt/airflow/app/data/states/shapefile.shp)
 """
 
@@ -60,32 +63,34 @@ def load_geographic_regions() -> int:
         'password': get_env_var('POSTGRES_PASSWORD'),
     }
 
+    # PostgresDataHandler valida la conexión en el constructor
     handler = PostgresDataHandler(connection_params)
     print(f"Conexión a PostgreSQL establecida: "
           f"{connection_params['host']}:{connection_params['port']}")
 
-    # Crear tabla si no existe (DDL idempotente)
+    # Crear tabla geographic_regions e índices si no existen
+    # (NO crea mobile_measurements ni voice_measurements)
     handler.create_tables()
 
-    # Verificar si ya hay datos
+    # Verificar si ya hay datos — operación de solo lectura
     if not handler.should_insert_geographic_data():
         print("✅ geographic_regions ya contiene datos — se omite la carga.")
         print("============================================================")
         return 0
 
-    # Verificar que el shapefile existe
+    # Verificar que el shapefile existe antes de intentar leerlo
     if not os.path.exists(shapefile_path):
         raise FileNotFoundError(
             f"Shapefile no encontrado: {shapefile_path}\n"
             "Asegúrate de que app/data/states/shapefile.shp esté presente en el contenedor."
         )
 
-    # Cargar shapefile
+    # Cargar shapefile con geopandas
     print(f"Cargando shapefile: {shapefile_path}")
     gdf = gpd.read_file(shapefile_path)
     print(f"Shapefile cargado: {len(gdf):,} regiones")
 
-    # Insertar en PostgreSQL (lógica en postgres_handler)
+    # Insertar en PostgreSQL reutilizando la lógica de postgres_handler
     handler.upsert_geographic_data(gdf)
 
     print(f"✅ {len(gdf):,} regiones geográficas cargadas exitosamente.")
