@@ -135,7 +135,7 @@ samm_pipeline/
 │   │   ├── extract_datos_table2.parquet     # SessionSummaryData móvil
 │   │   ├── extract_voz_table1.parquet       # SessionSummary voz
 │   │   ├── extract_voz_table3.parquet       # SessionSummaryVoice
-│   │   ├── extract_voz_table4.parquet       # SessionVoiceQuality (referencia)
+│   │   ├── extract_voz_table4.parquet       # SessionVoiceQuality
 │   │   ├── extract_datasource.parquet       # Catálogo PhoneNumber ↔ IMEI
 │   │   ├── sense_nacional_v0.xlsx           # Catálogo dispositivos SENSE
 │   │   └── states/                          # Shapefile de Ecuador (1 081 parroquias)
