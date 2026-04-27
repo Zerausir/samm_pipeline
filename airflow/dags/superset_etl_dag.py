@@ -15,66 +15,40 @@ default_args = {
 with DAG(
         'superset_etl_pipeline',
         default_args=default_args,
-        description='Pipeline secuencial completo para procesar datos móviles y de voz para visualización en PowerBI y Grafana',
-        schedule='0 9,14 * * *',  # ← schedule_interval → schedule
+        description='Pipeline secuencial para procesar datos móviles y de voz (raw) para visualización en PowerBI',
+        schedule='0 9,14 * * *',
         catchup=False,
-        tags=['etl', 'powerbi', 'grafana', 'mobile', 'voice', 'sequential']
+        tags=['etl', 'powerbi', 'mobile', 'voice', 'sequential']
 ) as dag:
-    # ========== PASO 1: PROCESAR DATOS MÓVILES ==========
+    # ========== PASO 1: CARGAR REGIONES GEOGRÁFICAS ==========
 
-    def run_main_script():
-        """Procesar datos móviles (datos principales)"""
-        from app.data_to_server.main import main
-        main()
-        return "Procesamiento de datos móviles completado"
+    def run_load_geographic_regions():
+        """Carga el shapefile en geographic_regions solo si la tabla está vacía."""
+        from app.data_to_server.load_geographic_regions import main
+        return main()
 
 
-    process_mobile_data = PythonOperator(
-        task_id='process_mobile_data',
-        python_callable=run_main_script,
+    load_geographic_regions_task = PythonOperator(
+        task_id='load_geographic_regions',
+        python_callable=run_load_geographic_regions,
         dag=dag,
         doc_md="""
-        ### PASO 1: Procesar Datos Móviles
+        ### PASO 1: Cargar Regiones Geográficas
 
-        Primera etapa del pipeline secuencial:
-        - Carga datos desde archivos parquet móviles
-        - Procesa y limpia los datos
-        - Calcula throughput
-        - Almacena en mobile_measurements
-        - Inserta datos geográficos si es necesario
+        - Lee el shapefile de parroquias del Ecuador desde app/data/states/shapefile.shp
+        - Inserta en geographic_regions solo si la tabla está vacía (idempotente)
+        - 1 081 parroquias con geometría GeoJSON, provincia, cantón y parroquia
+        - Si ya hay datos → se omite sin error
+
+        Prerequisito: shapefile presente en /opt/airflow/app/data/states/
         """,
     )
 
 
-    # ========== PASO 2: PROCESAR DATOS DE VOZ ==========
-
-    def run_voice_script():
-        """Procesar datos de voz"""
-        from app.data_to_server.main_voice import main
-        main()
-        return "Procesamiento de datos de voz completado"
-
-
-    process_voice_data = PythonOperator(
-        task_id='process_voice_data',
-        python_callable=run_voice_script,
-        dag=dag,
-        doc_md="""
-        ### PASO 2: Procesar Datos de Voz
-
-        Segunda etapa del pipeline secuencial:
-        - Carga datos desde archivos parquet de voz
-        - Procesa y merge múltiples tablas
-        - Limpia y valida datos de llamadas
-        - Almacena en voice_measurements preservando estructura original
-        """,
-    )
-
-
-    # ========== PASO 3 [NUEVO]: PROCESAR DATOS MÓVILES RAW ==========
+    # ========== PASO 2: PROCESAR DATOS MÓVILES RAW ==========
 
     def run_raw_mobile_script():
-        """Procesar datos móviles crudos para uso regulatorio en Grafana"""
+        """Procesar datos móviles crudos — incluye sesiones fallidas y todos los SessionType"""
         from app.data_to_server.main_raw_mobile import main
         main()
         return "Procesamiento de datos móviles raw completado"
@@ -85,20 +59,20 @@ with DAG(
         python_callable=run_raw_mobile_script,
         dag=dag,
         doc_md="""
-        ### PASO 3: Procesar Datos Móviles Raw (regulatorio / Grafana)
+        ### PASO 2: Procesar Datos Móviles Raw
 
-        - Mismos parquets que el paso 1
-        - Sin dropna — sesiones fallidas son datos regulatorios válidos
-        - Sin filtro de SessionType — la vista Grafana filtra HTTP Post/Download
-        - Almacena en mobile_raw_measurements
+        - Carga extract_datos_table1.parquet y extract_datos_table2.parquet
+        - Sin dropna de coordenadas ni throughput — sesiones fallidas son datos regulatorios válidos
+        - Todos los SessionType incluidos — la vista filtra HTTP Post/Download
+        - Almacena en mobile_raw_measurements (ON CONFLICT DO NOTHING)
         """,
     )
 
 
-    # ========== PASO 4 [NUEVO]: PROCESAR DATOS DE VOZ RAW ==========
+    # ========== PASO 3: PROCESAR DATOS DE VOZ RAW ==========
 
     def run_raw_voice_script():
-        """Procesar datos de voz crudos para uso regulatorio en Grafana"""
+        """Procesar datos de voz crudos — incluye llamadas fallidas, bloqueadas y caídas"""
         from app.data_to_server.main_raw_voice import main
         main()
         return "Procesamiento de datos de voz raw completado"
@@ -109,17 +83,17 @@ with DAG(
         python_callable=run_raw_voice_script,
         dag=dag,
         doc_md="""
-        ### PASO 4: Procesar Datos de Voz Raw (regulatorio / Grafana)
+        ### PASO 3: Procesar Datos de Voz Raw
 
-        - Mismos parquets que el paso 2
-        - Sin dropna — llamadas fallidas son datos regulatorios válidos
-        - Sin filtro de CallDirection — la vista Grafana filtra CallDirection='MO'
-        - Almacena en voice_raw_measurements
+        - Carga extract_voz_table1.parquet, extract_voz_table3.parquet, extract_voz_table4.parquet
+        - Sin dropna — llamadas fallidas/bloqueadas/caídas son datos regulatorios válidos
+        - Sin filtro de CallDirection — la vista filtra CallDirection='MO'
+        - Almacena en voice_raw_measurements (ON CONFLICT DO NOTHING)
         """,
     )
 
 
-    # ========== PASO 5 [NUEVO]: CARGAR CATÁLOGO DE DISPOSITIVOS ==========
+    # ========== PASO 4: CARGAR CATÁLOGO DE DISPOSITIVOS ==========
 
     def run_load_datasource():
         """Cargar catálogo PhoneNumber/IMSI/IMEI enriquecido con Device y CZO"""
@@ -133,11 +107,13 @@ with DAG(
         python_callable=run_load_datasource,
         dag=dag,
         doc_md="""
-        ### PASO 5: Cargar Catálogo de Dispositivos
+        ### PASO 4: Cargar Catálogo de Dispositivos
 
         - Lee extract_datasource.parquet (PhoneNumber, IMSI, IMEI)
         - Enriquece con Device y CZO desde sense_nacional_v0.xlsx
+        - Normaliza formato de número (+593XXXXXXXXX → 0XXXXXXXXX)
         - Upsert en datasource_phones (ON CONFLICT DO NOTHING)
+        - Inserta registros sense-only sin entrada en Datasource SQL Server
 
         Prerequisito: extract_data_datasource.py ejecutado en máquina AD
         y el Parquet copiado a app/data/.
@@ -145,37 +121,20 @@ with DAG(
     )
 
 
-    # ========== PASO 6: MAPEO ESPACIAL COMPLETO (datos clean) ==========
-
-    def run_update_all_mappings():
-        """Actualizar mapeo espacial para AMBOS tipos de datos"""
-        from app.data_to_server.update_mapping import update_all_mappings
-        count = update_all_mappings()
-        return f"Mapeo espacial completado: {count} mappings totales creados"
-
-
-    update_all_mappings = PythonOperator(
-        task_id='update_all_mappings',
-        python_callable=run_update_all_mappings,
-        dag=dag,
-        doc_md="""
-        ### PASO 6: Actualizar Mapeo Espacial Completo
-
-        - Procesa coordenadas de AMBOS tipos de datos (clean)
-        - Mapea puntos a regiones geográficas
-        - Actualiza tabla location_mapping para móviles Y voz
-        - Usa métodos especializados para cada tipo
-        """,
-    )
-
-
-    # ========== PASO 7 [NUEVO]: MAPEO ESPACIAL RAW ==========
+    # ========== PASO 5: MAPEO ESPACIAL RAW ==========
 
     def run_update_raw_mappings():
-        """Actualizar mapeo espacial para datos raw (regulatorio)"""
+        """
+        Actualizar mapeo espacial para datos raw.
+
+        Con los pasos clean eliminados, este paso es el único que pobla
+        location_mapping. Cubre la totalidad de measurement_ids presentes
+        en mobile_raw_measurements y voice_raw_measurements, incluyendo
+        sesiones fallidas, bloqueadas y caídas que antes quedaban sin mapear.
+        """
         from app.data_to_server.update_raw_mapping import update_raw_mappings
         count = update_raw_mappings()
-        return f"Mapeo espacial raw completado: {count} mappings totales creados"
+        return f"Mapeo espacial raw completado: {count} mappings creados"
 
 
     update_raw_mappings_task = PythonOperator(
@@ -183,324 +142,237 @@ with DAG(
         python_callable=run_update_raw_mappings,
         dag=dag,
         doc_md="""
-        ### PASO 7: Mapeo Espacial — Datos Raw
+        ### PASO 5: Mapeo Espacial — Datos Raw
 
         - mobile_raw_measurements + voice_raw_measurements → location_mapping
-        - Filas sin coordenadas se omiten (sesión fallida sin geo es correcto)
-        - Usa la misma tabla location_mapping que el paso 6
+        - Registros sin coordenadas (sesión fallida sin GPS) se omiten correctamente
+        - Usa geometry.covers(point) para correcta asignación en fronteras de parroquia
+        - Al ser el único paso de mapeo, todos los measurement_id reciben
+          location_type = 'mobile_raw' o 'voice_raw' de forma consistente
         """,
     )
 
 
-    # ========== PASO 8: CREAR VISTA MÓVIL ==========
+    # ========== PASO 6: CREAR VISTAS GEOREFERENCIADAS PARA POWERBI ==========
 
-    def run_create_mobile_dashboards():
-        """Crear vista de dashboard para datos móviles"""
-        from app.data_to_server.create_dashboard_view import create_dashboard_views
-        create_dashboard_views()
-        return "Vista de dashboard móvil creada con éxito"
-
-
-    create_mobile_views = PythonOperator(
-        task_id='create_mobile_views',
-        python_callable=run_create_mobile_dashboards,
-        dag=dag,
-        doc_md="""
-        ### PASO 8: Crear Vista de Dashboard - Datos Móviles
-
-        - data_dashboard_view_visualization
-        - Preserva todos los nombres de columnas originales
-        - Lista para análisis directo en PowerBI
-        """,
-    )
-
-
-    # ========== PASO 9: CREAR VISTA DE VOZ ==========
-
-    def run_create_voice_dashboards():
-        """Crear vista de dashboard para datos de voz"""
-        from app.data_to_server.create_dashboard_view_voice import create_voice_dashboard_views
-        create_voice_dashboard_views()
-        return "Vista de dashboard de voz creada con éxito"
-
-
-    create_voice_views = PythonOperator(
-        task_id='create_voice_views',
-        python_callable=run_create_voice_dashboards,
-        dag=dag,
-        doc_md="""
-        ### PASO 9: Crear Vista de Dashboard - Datos de Voz
-
-        - voice_dashboard_view_visualization
-        - Preserva todos los nombres de columnas originales
-        - Lista para análisis directo en PowerBI
-        """,
-    )
-
-
-    # ========== PASO 10 [NUEVO]: CREAR VISTAS GRAFANA GEOREFERENCIADAS ==========
-
-    def run_create_grafana_geo_views():
-        """Crear vistas georeferenciadas para los 4 dashboards de Grafana"""
+    def run_create_geo_views():
+        """Crear vistas georeferenciadas para los dashboards de PowerBI"""
         from app.data_to_server.create_grafana_geo_views import create_grafana_geo_views
         create_grafana_geo_views()
-        return "Vistas georeferenciadas para Grafana creadas con éxito"
+        return "Vistas georeferenciadas para PowerBI creadas con éxito"
 
 
-    create_grafana_geo_views_task = PythonOperator(
-        task_id='create_grafana_geo_views',
-        python_callable=run_create_grafana_geo_views,
+    create_geo_views_task = PythonOperator(
+        task_id='create_geo_views',
+        python_callable=run_create_geo_views,
         dag=dag,
         doc_md="""
-        ### PASO 10: Crear Vistas Georeferenciadas para Grafana
+        ### PASO 6: Crear Vistas Georeferenciadas para PowerBI
 
-        | Vista                    | Fuente                   | Filtro aplicado          |
-        |--------------------------|--------------------------|--------------------------|
-        | grafana_mobile_geo_view  | mobile_raw_measurements  | SessionType HTTP Post/DL |
-        | grafana_voice_geo_view   | voice_raw_measurements   | CallDirection = 'MO'     |
+        | Vista                   | Fuente                  | Filtro en vista          |
+        |-------------------------|-------------------------|--------------------------|
+        | grafana_mobile_geo_view | mobile_raw_measurements | SessionType HTTP Post/DL |
+        | grafana_voice_geo_view  | voice_raw_measurements  | CallDirection = 'MO'     |
 
         Añade sobre los datos raw: Provincia, Cantón, Parroquia, PhoneNumber, Device, CZO.
+
+        Puntos de falla (sesiones sin ThroughputMbps, llamadas caídas/bloqueadas/fallidas)
+        quedan incluidos — PowerBI puede visualizarlos en mapas junto a los exitosos.
         """,
     )
 
 
-    # ========== PASO 11: VALIDACIÓN FINAL ==========
+    # ========== PASO 7: VALIDACIÓN FINAL ==========
 
-    def validate_complete_pipeline():
-        """Validar integridad completa del pipeline"""
+    def validate_pipeline():
+        """Validar integridad del pipeline raw"""
         import psycopg2
         import os
         from dotenv import load_dotenv
+        from datetime import datetime
 
         load_dotenv()
 
         try:
-            db_host = os.getenv('POSTGRES_HOST')
-            db_port = os.getenv('POSTGRES_PORT')
-            db_name = os.getenv('POSTGRES_DB')
-            db_user = os.getenv('POSTGRES_USER')
-            db_pass = os.getenv('POSTGRES_PASSWORD')
-
-            print(
-                f"DEBUG - Host: {db_host}, Port: {db_port}, DB: {db_name}, User: {db_user}, Pass: {'***' if db_pass else 'None'}")
-
             conn = psycopg2.connect(
-                host=db_host,
-                port=db_port,
-                database=db_name,
-                user=db_user,
-                password=db_pass
+                host=os.getenv('POSTGRES_HOST'),
+                port=os.getenv('POSTGRES_PORT'),
+                database=os.getenv('POSTGRES_DB'),
+                user=os.getenv('POSTGRES_USER'),
+                password=os.getenv('POSTGRES_PASSWORD'),
             )
 
-            validation_results = []
-
             with conn.cursor() as cur:
-                # Validar datos móviles clean
-                cur.execute("SELECT COUNT(*) FROM mobile_measurements WHERE is_current = 1")
-                mobile_count = cur.fetchone()[0]
 
-                # Validar datos de voz clean
-                cur.execute("SELECT COUNT(*) FROM voice_measurements WHERE is_current = 1")
-                voice_count = cur.fetchone()[0]
-
-                # Validar regiones geográficas
-                cur.execute("SELECT COUNT(*) FROM geographic_regions WHERE is_current = 1")
-                regions_count = cur.fetchone()[0]
-
-                # Validar mapeos espaciales (clean)
-                cur.execute("""
-                    SELECT COUNT(*) FROM location_mapping lm 
-                    JOIN mobile_measurements mm ON lm.measurement_id = mm.measurement_id 
-                    WHERE mm.is_current = 1
-                """)
-                mobile_mapped = cur.fetchone()[0]
-
-                cur.execute("""
-                    SELECT COUNT(*) FROM location_mapping lm 
-                    JOIN voice_measurements vm ON lm.measurement_id = vm.measurement_id 
-                    WHERE vm.is_current = 1
-                """)
-                voice_mapped = cur.fetchone()[0]
-
-                # Validar vistas PowerBI
-                cur.execute(
-                    "SELECT EXISTS (SELECT FROM information_schema.views WHERE table_name = 'data_dashboard_view_visualization')")
-                mobile_view_exists = cur.fetchone()[0]
-
-                cur.execute(
-                    "SELECT EXISTS (SELECT FROM information_schema.views WHERE table_name = 'voice_dashboard_view_visualization')")
-                voice_view_exists = cur.fetchone()[0]
-
-                # Contar registros en vistas PowerBI
-                mobile_view_count = 0
-                voice_view_count = 0
-
-                if mobile_view_exists:
-                    cur.execute("SELECT COUNT(*) FROM data_dashboard_view_visualization")
-                    mobile_view_count = cur.fetchone()[0]
-
-                if voice_view_exists:
-                    cur.execute("SELECT COUNT(*) FROM voice_dashboard_view_visualization")
-                    voice_view_count = cur.fetchone()[0]
-
-                # [NUEVO] Validar datos raw
+                # --- Tablas raw ---
                 cur.execute("SELECT COUNT(*) FROM mobile_raw_measurements WHERE is_current = 1")
                 mobile_raw_count = cur.fetchone()[0]
 
                 cur.execute("SELECT COUNT(*) FROM voice_raw_measurements WHERE is_current = 1")
                 voice_raw_count = cur.fetchone()[0]
 
-                # [NUEVO] Validar catálogo de dispositivos
+                # --- Regiones geográficas ---
+                cur.execute("SELECT COUNT(*) FROM geographic_regions WHERE is_current = 1")
+                regions_count = cur.fetchone()[0]
+
+                # --- Catálogo de dispositivos ---
                 cur.execute(
-                    "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'datasource_phones')")
-                ds_table_exists = cur.fetchone()[0]
+                    "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'datasource_phones')"
+                )
+                ds_exists = cur.fetchone()[0]
                 ds_count = 0
-                if ds_table_exists:
+                if ds_exists:
                     cur.execute("SELECT COUNT(*) FROM datasource_phones")
                     ds_count = cur.fetchone()[0]
 
-                # [NUEVO] Validar vistas Grafana
+                # --- Mapeos espaciales (sobre tablas raw) ---
+                cur.execute("""
+                    SELECT COUNT(*) FROM location_mapping lm
+                    JOIN mobile_raw_measurements m ON lm.measurement_id = m.measurement_id
+                    WHERE m.is_current = 1
+                """)
+                mobile_mapped = cur.fetchone()[0]
+
+                cur.execute("""
+                    SELECT COUNT(*) FROM location_mapping lm
+                    JOIN voice_raw_measurements v ON lm.measurement_id = v.measurement_id
+                    WHERE v.is_current = 1
+                """)
+                voice_mapped = cur.fetchone()[0]
+
+                mobile_map_pct = (mobile_mapped / mobile_raw_count * 100) if mobile_raw_count > 0 else 0
+                voice_map_pct = (voice_mapped / voice_raw_count * 100) if voice_raw_count > 0 else 0
+
+                # --- Vistas georeferenciadas ---
                 cur.execute(
-                    "SELECT EXISTS (SELECT FROM information_schema.views WHERE table_name = 'grafana_mobile_geo_view')")
-                grafana_mobile_exists = cur.fetchone()[0]
-
-                cur.execute(
-                    "SELECT EXISTS (SELECT FROM information_schema.views WHERE table_name = 'grafana_voice_geo_view')")
-                grafana_voice_exists = cur.fetchone()[0]
-
-                grafana_mobile_count = 0
-                grafana_voice_count = 0
-
-                if grafana_mobile_exists:
-                    cur.execute("SELECT COUNT(*) FROM grafana_mobile_geo_view")
-                    grafana_mobile_count = cur.fetchone()[0]
-
-                if grafana_voice_exists:
-                    cur.execute("SELECT COUNT(*) FROM grafana_voice_geo_view")
-                    grafana_voice_count = cur.fetchone()[0]
-
-                # Calcular porcentajes de mapeo
-                mobile_mapping_pct = (mobile_mapped / mobile_count * 100) if mobile_count > 0 else 0
-                voice_mapping_pct = (voice_mapped / voice_count * 100) if voice_count > 0 else 0
-
-                # Generar reporte de validación
-                validation_results = [
-                    "=== VALIDACIÓN COMPLETA DEL PIPELINE ===",
-                    f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    "",
-                    "📊 DATOS PROCESADOS (clean / PowerBI):",
-                    f"  • Mediciones móviles: {mobile_count:,}",
-                    f"  • Mediciones de voz: {voice_count:,}",
-                    f"  • Regiones geográficas: {regions_count:,}",
-                    "",
-                    "📋 DATOS RAW (regulatorio / Grafana):",
-                    f"  • Mediciones móviles raw: {mobile_raw_count:,}",
-                    f"  • Mediciones de voz raw: {voice_raw_count:,}",
-                    "",
-                    "📱 CATÁLOGO DE DISPOSITIVOS:",
-                    f"  • datasource_phones: {ds_count:,} {'✅' if ds_count > 0 else '❌'}",
-                    "",
-                    "🗺️ MAPEOS ESPACIALES:",
-                    f"  • Móviles mapeados: {mobile_mapped:,}",
-                    f"  • Voz mapeados: {voice_mapped:,}",
-                    f"  • Total mappings: {mobile_mapped + voice_mapped:,}",
-                    "",
-                    "📈 VISTAS POWERBI:",
-                    f"  • Vista móvil: {'✅' if mobile_view_exists else '❌'} ({mobile_view_count:,} registros)",
-                    f"  • Vista voz: {'✅' if voice_view_exists else '❌'} ({voice_view_count:,} registros)",
-                    "",
-                    "📡 VISTAS GRAFANA:",
-                    f"  • grafana_mobile_geo_view: {'✅' if grafana_mobile_exists else '❌'} ({grafana_mobile_count:,} registros)",
-                    f"  • grafana_voice_geo_view:  {'✅' if grafana_voice_exists else '❌'} ({grafana_voice_count:,} registros)",
-                    "",
-                    "🎯 CALIDAD DE DATOS:",
-                    f"  • Mapeo móvil: {mobile_mapping_pct:.1f}%",
-                    f"  • Mapeo voz: {voice_mapping_pct:.1f}%",
-                    "",
-                ]
-
-                # Estado final
-                pipeline_success = (
-                        mobile_count > 0 and
-                        voice_count > 0 and
-                        mobile_view_exists and
-                        voice_view_exists and
-                        mobile_mapping_pct > 50 and
-                        voice_mapping_pct > 50
+                    "SELECT EXISTS (SELECT FROM information_schema.views WHERE table_name = 'grafana_mobile_geo_view')"
                 )
+                mobile_view_exists = cur.fetchone()[0]
 
-                if pipeline_success:
-                    validation_results.extend([
-                        "✅ ESTADO: Pipeline completado exitosamente",
-                        "🚀 Datos listos para PowerBI y Grafana",
-                        "",
-                        "📋 CONEXIONES POWERBI:",
-                        "  • data_dashboard_view_visualization (datos móviles)",
-                        "  • voice_dashboard_view_visualization (datos de voz)",
-                        "",
-                        "📡 CONEXIONES GRAFANA:",
-                        "  • grafana_mobile_geo_view (HTTP Post / HTTP Download)",
-                        "  • grafana_voice_geo_view  (llamadas MO)"
-                    ])
-                else:
-                    validation_results.append("❌ ESTADO: Pipeline completado con advertencias")
-                    if mobile_count == 0:
-                        validation_results.append("   ⚠️ No hay datos móviles")
-                    if voice_count == 0:
-                        validation_results.append("   ⚠️ No hay datos de voz")
-                    if not mobile_view_exists:
-                        validation_results.append("   ⚠️ Vista móvil no creada")
-                    if not voice_view_exists:
-                        validation_results.append("   ⚠️ Vista de voz no creada")
-                    if mobile_mapping_pct <= 50:
-                        validation_results.append(f"   ⚠️ Mapeo móvil bajo: {mobile_mapping_pct:.1f}%")
-                    if voice_mapping_pct <= 50:
-                        validation_results.append(f"   ⚠️ Mapeo voz bajo: {voice_mapping_pct:.1f}%")
-                    if not grafana_mobile_exists:
-                        validation_results.append("   ⚠️ Vista Grafana móvil no creada")
-                    if not grafana_voice_exists:
-                        validation_results.append("   ⚠️ Vista Grafana voz no creada")
+                cur.execute(
+                    "SELECT EXISTS (SELECT FROM information_schema.views WHERE table_name = 'grafana_voice_geo_view')"
+                )
+                voice_view_exists = cur.fetchone()[0]
 
-                validation_text = "\n".join(validation_results)
-                print(validation_text)
+                mobile_view_count = 0
+                voice_view_count = 0
+                if mobile_view_exists:
+                    cur.execute("SELECT COUNT(*) FROM grafana_mobile_geo_view")
+                    mobile_view_count = cur.fetchone()[0]
+                if voice_view_exists:
+                    cur.execute("SELECT COUNT(*) FROM grafana_voice_geo_view")
+                    voice_view_count = cur.fetchone()[0]
+
+                # --- Cobertura geográfica en vistas ---
+                mobile_geo_pct = 0
+                voice_geo_pct = 0
+                if mobile_view_exists and mobile_view_count > 0:
+                    cur.execute('SELECT COUNT(*) FROM grafana_mobile_geo_view WHERE "Provincia" IS NOT NULL')
+                    mobile_geo_pct = cur.fetchone()[0] / mobile_view_count * 100
+                if voice_view_exists and voice_view_count > 0:
+                    cur.execute('SELECT COUNT(*) FROM grafana_voice_geo_view WHERE "Provincia" IS NOT NULL')
+                    voice_geo_pct = cur.fetchone()[0] / voice_view_count * 100
 
             conn.close()
-            return validation_text
+
+            # --- Criterio de éxito ---
+            pipeline_ok = (
+                    mobile_raw_count > 0
+                    and voice_raw_count > 0
+                    and mobile_view_exists
+                    and voice_view_exists
+                    and mobile_map_pct > 50
+                    and voice_map_pct > 50
+            )
+
+            lines = [
+                "=" * 55,
+                "   VALIDACIÓN DEL PIPELINE ETL — SAMM",
+                f"   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "=" * 55,
+                "",
+                "📋 DATOS RAW (PowerBI):",
+                f"  • mobile_raw_measurements : {mobile_raw_count:,}",
+                f"  • voice_raw_measurements  : {voice_raw_count:,}",
+                "",
+                "🗺️  REGIONES GEOGRÁFICAS:",
+                f"  • geographic_regions      : {regions_count:,} parroquias",
+                "",
+                "📱 CATÁLOGO DE DISPOSITIVOS:",
+                f"  • datasource_phones       : {ds_count:,} {'✅' if ds_count > 0 else '❌'}",
+                "",
+                "📍 MAPEO ESPACIAL (raw):",
+                f"  • Móviles mapeados : {mobile_mapped:,} / {mobile_raw_count:,} ({mobile_map_pct:.1f}%)",
+                f"  • Voz mapeada      : {voice_mapped:,} / {voice_raw_count:,} ({voice_map_pct:.1f}%)",
+                "",
+                "📊 VISTAS POWERBI:",
+                f"  • grafana_mobile_geo_view : {'✅' if mobile_view_exists else '❌'} "
+                f"{mobile_view_count:,} registros — {mobile_geo_pct:.1f}% con Provincia",
+                f"  • grafana_voice_geo_view  : {'✅' if voice_view_exists else '❌'} "
+                f"{voice_view_count:,} registros — {voice_geo_pct:.1f}% con Provincia",
+                "",
+            ]
+
+            if pipeline_ok:
+                lines += [
+                    "✅ ESTADO: Pipeline completado exitosamente",
+                    "",
+                    "🔌 CONEXIONES POWERBI:",
+                    "  • grafana_mobile_geo_view  (HTTP Post + HTTP Download + fallos)",
+                    "  • grafana_voice_geo_view   (llamadas MO + caídas + bloqueadas)",
+                ]
+            else:
+                lines.append("❌ ESTADO: Pipeline completado con advertencias")
+                if mobile_raw_count == 0:
+                    lines.append("   ⚠️  No hay datos móviles raw")
+                if voice_raw_count == 0:
+                    lines.append("   ⚠️  No hay datos de voz raw")
+                if not mobile_view_exists:
+                    lines.append("   ⚠️  grafana_mobile_geo_view no creada")
+                if not voice_view_exists:
+                    lines.append("   ⚠️  grafana_voice_geo_view no creada")
+                if mobile_map_pct <= 50:
+                    lines.append(f"   ⚠️  Mapeo móvil bajo: {mobile_map_pct:.1f}%")
+                if voice_map_pct <= 50:
+                    lines.append(f"   ⚠️  Mapeo voz bajo: {voice_map_pct:.1f}%")
+
+            report = "\n".join(lines)
+            print(report)
+            return report
 
         except Exception as e:
-            error_msg = f"❌ Error en validación final: {e}"
-            print(error_msg)
-            raise Exception(error_msg)
+            msg = f"❌ Error en validación final: {e}"
+            print(msg)
+            raise Exception(msg)
 
 
     pipeline_validation = PythonOperator(
         task_id='pipeline_validation',
-        python_callable=validate_complete_pipeline,
+        python_callable=validate_pipeline,
         dag=dag,
         doc_md="""
-        ### PASO 11: Validación Final del Pipeline
+        ### PASO 7: Validación Final del Pipeline
 
-        Última etapa del pipeline secuencial:
-        - Valida integridad de datos clean (PowerBI) y raw (Grafana)
-        - Verifica mapeos espaciales
-        - Confirma disponibilidad de todas las vistas
-        - Genera reporte completo
+        Verifica integridad de:
+        - Tablas raw (mobile_raw_measurements, voice_raw_measurements)
+        - Regiones geográficas (geographic_regions)
+        - Catálogo datasource_phones
+        - Cobertura del mapeo espacial (umbral > 50%)
+        - Existencia y recuento de vistas georeferenciadas
+        - Porcentaje de registros con Provincia asignada en cada vista
+
+        Criterio de éxito: datos raw > 0, ambas vistas existentes, mapeo > 50%.
         """,
     )
 
-    # ========== DEFINICIÓN DE DEPENDENCIAS SECUENCIALES ==========
-
-    # Pipeline completamente secuencial: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11
+    # ========== DEPENDENCIAS SECUENCIALES ==========
+    # 1 → 2 → 3 → 4 → 5 → 6 → 7
     (
-            process_mobile_data
-            >> process_voice_data
+            load_geographic_regions_task
             >> process_raw_mobile_data
             >> process_raw_voice_data
             >> load_datasource_task
-            >> update_all_mappings
             >> update_raw_mappings_task
-            >> create_mobile_views
-            >> create_voice_views
-            >> create_grafana_geo_views_task
+            >> create_geo_views_task
             >> pipeline_validation
     )
