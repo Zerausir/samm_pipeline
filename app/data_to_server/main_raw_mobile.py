@@ -13,6 +13,13 @@ Características:
 Extensibilidad:
   Cualquier análisis futuro (FTP, Video, etc.) solo requiere una nueva
   vista sobre mobile_raw_measurements, sin reprocesar histórico.
+
+Fix 2026-05-05:
+  - df.loc[:, col] = Int64  →  df[col] = Int64  en _process_table1_raw y
+    _process_sense_nacional.
+    pandas 2.x lanza LossySetitemError al asignar Int64 a columna float64
+    cuando hay IMEI de 15 dígitos no exactamente representables en float64.
+    df[col] = reemplaza la columna completa cambiando el dtype a Int64.
 """
 
 import gc
@@ -115,11 +122,15 @@ def _process_table1_raw(df):
             if col in df.columns:
                 df.loc[:, col] = df[col].astype(float)
 
-        df.loc[:, 'IMSI'] = pd.to_numeric(df['IMSI'], errors='coerce').astype('Int64')
-        df.loc[:, 'IMEI'] = pd.to_numeric(df['IMEI'], errors='coerce').astype('Int64')
+        # FIX 2026-05-05: df[col] = en lugar de df.loc[:, col] =
+        # pandas 2.x lanza LossySetitemError al asignar Int64 a columna float64
+        # cuando hay IMEI de 15 dígitos no exactamente representables en float64.
+        # df[col] = reemplaza la columna completa cambiando el dtype a Int64.
+        df['IMSI'] = pd.to_numeric(df['IMSI'], errors='coerce').astype('Int64')
+        df['IMEI'] = pd.to_numeric(df['IMEI'], errors='coerce').astype('Int64')
 
         if 'LogfileId' in df.columns:
-            df.loc[:, 'LogfileId'] = pd.to_numeric(df['LogfileId'], errors='coerce').astype('Int64')
+            df['LogfileId'] = pd.to_numeric(df['LogfileId'], errors='coerce').astype('Int64')
 
         if 'IpAddress' in df.columns:
             def convertir_ip(ip):
@@ -260,8 +271,10 @@ def _process_table2(df):
 def _process_sense_nacional(df):
     print("Procesando sense_nacional...")
     try:
-        df.loc[:, 'IMSI'] = pd.to_numeric(df['IMSI'], errors='coerce').astype('Int64')
-        df.loc[:, 'IMEI'] = pd.to_numeric(df['IMEI'], errors='coerce').astype('Int64')
+        # FIX 2026-05-05: df[col] = en lugar de df.loc[:, col] =
+        # pandas 2.x lanza LossySetitemError al asignar Int64 a columna float64.
+        df['IMSI'] = pd.to_numeric(df['IMSI'], errors='coerce').astype('Int64')
+        df['IMEI'] = pd.to_numeric(df['IMEI'], errors='coerce').astype('Int64')
         return df
     except Exception as e:
         raise ValueError(f"Error procesando sense_nacional: {e}")
