@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator, ShortCircuitOperator
 
 default_args = {
     'owner': 'ivan',
@@ -20,6 +20,177 @@ with DAG(
         catchup=False,
         tags=['etl', 'powerbi', 'mobile', 'voice', 'sequential']
 ) as dag:
+    # ========== PASO 0: VERIFICAR DATOS NUEVOS ==========
+
+    def check_new_data() -> bool:
+        """
+        Compara los metadatos de los Parquets actuales contra el último
+        pipeline exitoso almacenado en pipeline_state.
+
+        Retorna True  → hay datos nuevos, continuar con el pipeline.
+        Retorna False → sin cambios, ShortCircuitOperator omite pasos 1-7.
+
+        Lógica de comparación (dos niveles):
+          1. latest_record_date  — fecha del registro más reciente en SQL Server.
+          2. row counts          — total de filas por tabla.
+        Si cualquier campo difiere → procesar.
+        Si pipeline_state está vacío (primera ejecución) → procesar.
+        Si algún archivo de metadatos no existe → procesar (extractor no corrió aún).
+        """
+        import json
+        import os
+        import psycopg2
+        from dotenv import load_dotenv
+
+        load_dotenv()
+
+        DATA_DIR = os.getenv('DATA_DIR', '/opt/airflow/app/data')
+
+        # ------------------------------------------------------------------
+        # 1. Leer metadatos actuales de los Parquets
+        # ------------------------------------------------------------------
+        metadata_files = {
+            'datos': os.path.join(DATA_DIR, 'extraction_datos_metadata.json'),
+            'voz': os.path.join(DATA_DIR, 'extraction_voz_metadata.json'),
+            'datasource': os.path.join(DATA_DIR, 'extraction_datasource_metadata.json'),
+        }
+
+        current = {}
+        for key, path in metadata_files.items():
+            if not os.path.exists(path):
+                print(f"⚠️  Metadatos '{key}' no encontrados en {path} → procesando")
+                return True
+            with open(path, 'r', encoding='utf-8') as f:
+                current[key] = json.load(f)
+            print(f"✅ Metadatos '{key}' cargados desde {path}")
+
+        # Campos de comparación extraídos de los JSONs
+        new_state = {
+            'datos_latest_record_date': current['datos'].get('latest_record_date'),
+            'datos_table1_rows': int(current['datos'].get('table1_rows', 0)),
+            'datos_table2_rows': int(current['datos'].get('table2_rows', 0)),
+            'voz_latest_record_date': current['voz'].get('latest_record_date'),
+            'voz_table1_rows': int(current['voz'].get('table1_rows', 0)),
+            'voz_table3_rows': int(current['voz'].get('table3_rows', 0)),
+            'voz_table4_rows': int(current['voz'].get('table4_rows', 0)),
+            'datasource_total_rows': int(current['datasource'].get('total_rows', 0)),
+        }
+
+        print("\n📋 Estado actual de los Parquets:")
+        for k, v in new_state.items():
+            print(f"   {k}: {v}")
+
+        # ------------------------------------------------------------------
+        # 2. Conectar a PostgreSQL y garantizar que pipeline_state existe
+        # ------------------------------------------------------------------
+        conn = psycopg2.connect(
+            host=os.getenv('POSTGRES_HOST'),
+            port=os.getenv('POSTGRES_PORT'),
+            database=os.getenv('POSTGRES_DB'),
+            user=os.getenv('POSTGRES_USER'),
+            password=os.getenv('POSTGRES_PASSWORD'),
+        )
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS pipeline_state (
+                        id                        SERIAL PRIMARY KEY,
+                        run_timestamp             TIMESTAMP NOT NULL DEFAULT NOW(),
+                        datos_latest_record_date  TEXT,
+                        datos_table1_rows         BIGINT,
+                        datos_table2_rows         BIGINT,
+                        voz_latest_record_date    TEXT,
+                        voz_table1_rows           BIGINT,
+                        voz_table3_rows           BIGINT,
+                        voz_table4_rows           BIGINT,
+                        datasource_total_rows     BIGINT,
+                        status                    TEXT DEFAULT 'success'
+                    )
+                """)
+                conn.commit()
+
+                # ------------------------------------------------------------------
+                # 3. Leer último estado exitoso
+                # ------------------------------------------------------------------
+                cur.execute("""
+                    SELECT
+                        datos_latest_record_date,
+                        datos_table1_rows,
+                        datos_table2_rows,
+                        voz_latest_record_date,
+                        voz_table1_rows,
+                        voz_table3_rows,
+                        voz_table4_rows,
+                        datasource_total_rows
+                    FROM pipeline_state
+                    WHERE status = 'success'
+                    ORDER BY run_timestamp DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+
+        finally:
+            conn.close()
+
+        # ------------------------------------------------------------------
+        # 4. Comparar
+        # ------------------------------------------------------------------
+        if row is None:
+            print("\n🆕 pipeline_state vacío — primera ejecución → procesando")
+            return True
+
+        last_state = {
+            'datos_latest_record_date': row[0],
+            'datos_table1_rows': row[1],
+            'datos_table2_rows': row[2],
+            'voz_latest_record_date': row[3],
+            'voz_table1_rows': row[4],
+            'voz_table3_rows': row[5],
+            'voz_table4_rows': row[6],
+            'datasource_total_rows': row[7],
+        }
+
+        print("\n📋 Último estado procesado:")
+        for k, v in last_state.items():
+            print(f"   {k}: {v}")
+
+        diffs = [k for k in new_state if str(new_state[k]) != str(last_state.get(k))]
+
+        if diffs:
+            print(f"\n🔄 Cambios detectados en: {', '.join(diffs)} → procesando")
+            return True
+
+        print("\n✅ Sin datos nuevos — pipeline omitido (ahorro de recursos)")
+        return False
+
+
+    check_new_data_task = ShortCircuitOperator(
+        task_id='check_new_data',
+        python_callable=check_new_data,
+        dag=dag,
+        doc_md="""
+        ### PASO 0: Verificar Datos Nuevos
+
+        Compara los metadatos de los Parquets actuales contra el último
+        pipeline exitoso registrado en `pipeline_state` (PostgreSQL).
+
+        **Campos comparados:**
+        - `latest_record_date` de datos móviles y de voz
+        - Conteo de filas por tabla (`table1_rows`, `table2_rows`, etc.)
+        - `total_rows` del catálogo de dispositivos
+
+        **Resultado:**
+        - `True`  → hay cambios → el pipeline continúa con los pasos 1-7
+        - `False` → sin cambios → todos los pasos downstream pasan a `skipped`
+
+        La tabla `pipeline_state` se crea automáticamente si no existe
+        (primera ejecución). Los metadatos son generados por `samm_extract_data`
+        y transferidos a `app/data/` junto con los Parquets.
+        """,
+    )
+
+
     # ========== PASO 1: CARGAR REGIONES GEOGRÁFICAS ==========
 
     def run_load_geographic_regions():
@@ -185,13 +356,20 @@ with DAG(
     # ========== PASO 7: VALIDACIÓN FINAL ==========
 
     def validate_pipeline():
-        """Validar integridad del pipeline raw"""
-        import psycopg2
+        """
+        Validar integridad del pipeline raw.
+        Si la validación es exitosa, registra el estado en pipeline_state
+        para que el Paso 0 pueda comparar en la próxima ejecución.
+        """
+        import json
         import os
+        import psycopg2
         from dotenv import load_dotenv
         from datetime import datetime
 
         load_dotenv()
+
+        DATA_DIR = os.getenv('DATA_DIR', '/opt/airflow/app/data')
 
         try:
             conn = psycopg2.connect(
@@ -256,26 +434,28 @@ with DAG(
 
                 mobile_view_count = 0
                 voice_view_count = 0
+                mobile_provincia_pct = 0.0
+                voice_provincia_pct = 0.0
+
                 if mobile_view_exists:
-                    cur.execute("SELECT COUNT(*) FROM grafana_mobile_geo_view")
+                    cur.execute('SELECT COUNT(*) FROM grafana_mobile_geo_view')
                     mobile_view_count = cur.fetchone()[0]
+                    if mobile_view_count > 0:
+                        cur.execute(
+                            'SELECT COUNT(*) FROM grafana_mobile_geo_view WHERE "Provincia" IS NOT NULL'
+                        )
+                        mobile_provincia_pct = cur.fetchone()[0] / mobile_view_count * 100
+
                 if voice_view_exists:
-                    cur.execute("SELECT COUNT(*) FROM grafana_voice_geo_view")
+                    cur.execute('SELECT COUNT(*) FROM grafana_voice_geo_view')
                     voice_view_count = cur.fetchone()[0]
+                    if voice_view_count > 0:
+                        cur.execute(
+                            'SELECT COUNT(*) FROM grafana_voice_geo_view WHERE "Provincia" IS NOT NULL'
+                        )
+                        voice_provincia_pct = cur.fetchone()[0] / voice_view_count * 100
 
-                # --- Cobertura geográfica en vistas ---
-                mobile_geo_pct = 0
-                voice_geo_pct = 0
-                if mobile_view_exists and mobile_view_count > 0:
-                    cur.execute('SELECT COUNT(*) FROM grafana_mobile_geo_view WHERE "Provincia" IS NOT NULL')
-                    mobile_geo_pct = cur.fetchone()[0] / mobile_view_count * 100
-                if voice_view_exists and voice_view_count > 0:
-                    cur.execute('SELECT COUNT(*) FROM grafana_voice_geo_view WHERE "Provincia" IS NOT NULL')
-                    voice_geo_pct = cur.fetchone()[0] / voice_view_count * 100
-
-            conn.close()
-
-            # --- Criterio de éxito ---
+            # --- Determinar éxito ---
             pipeline_ok = (
                     mobile_raw_count > 0
                     and voice_raw_count > 0
@@ -286,31 +466,21 @@ with DAG(
             )
 
             lines = [
-                "=" * 55,
-                "   VALIDACIÓN DEL PIPELINE ETL — SAMM",
-                f"   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "=" * 55,
                 "",
-                "📋 DATOS RAW (PowerBI):",
-                f"  • mobile_raw_measurements : {mobile_raw_count:,}",
-                f"  • voice_raw_measurements  : {voice_raw_count:,}",
-                "",
-                "🗺️  REGIONES GEOGRÁFICAS:",
-                f"  • geographic_regions      : {regions_count:,} parroquias",
-                "",
-                "📱 CATÁLOGO DE DISPOSITIVOS:",
-                f"  • datasource_phones       : {ds_count:,} {'✅' if ds_count > 0 else '❌'}",
-                "",
-                "📍 MAPEO ESPACIAL (raw):",
-                f"  • Móviles mapeados : {mobile_mapped:,} / {mobile_raw_count:,} ({mobile_map_pct:.1f}%)",
-                f"  • Voz mapeada      : {voice_mapped:,} / {voice_raw_count:,} ({voice_map_pct:.1f}%)",
-                "",
-                "📊 VISTAS POWERBI:",
-                f"  • grafana_mobile_geo_view : {'✅' if mobile_view_exists else '❌'} "
-                f"{mobile_view_count:,} registros — {mobile_geo_pct:.1f}% con Provincia",
-                f"  • grafana_voice_geo_view  : {'✅' if voice_view_exists else '❌'} "
-                f"{voice_view_count:,} registros — {voice_geo_pct:.1f}% con Provincia",
-                "",
+                "=" * 70,
+                "📊 REPORTE DE VALIDACIÓN — SAMM PIPELINE",
+                "=" * 70,
+                f"  Móvil raw       : {mobile_raw_count:,} registros",
+                f"  Voz raw         : {voice_raw_count:,} registros",
+                f"  Regiones        : {regions_count:,} parroquias",
+                f"  Catálogo        : {ds_count:,} dispositivos",
+                f"  Mapeo móvil     : {mobile_map_pct:.1f}%  ({mobile_mapped:,}/{mobile_raw_count:,})",
+                f"  Mapeo voz       : {voice_map_pct:.1f}%  ({voice_mapped:,}/{voice_raw_count:,})",
+                f"  Vista móvil     : {'✅' if mobile_view_exists else '❌'}  {mobile_view_count:,} registros  "
+                f"({mobile_provincia_pct:.1f}% con Provincia)",
+                f"  Vista voz       : {'✅' if voice_view_exists else '❌'}  {voice_view_count:,} registros  "
+                f"({voice_provincia_pct:.1f}% con Provincia)",
+                "=" * 70,
             ]
 
             if pipeline_ok:
@@ -338,6 +508,74 @@ with DAG(
 
             report = "\n".join(lines)
             print(report)
+
+            # ------------------------------------------------------------------
+            # Registrar estado en pipeline_state (solo si el pipeline fue exitoso)
+            # Esto permite al Paso 0 detectar cambios en la próxima ejecución.
+            # ------------------------------------------------------------------
+            if pipeline_ok:
+                metadata_files = {
+                    'datos': os.path.join(DATA_DIR, 'extraction_datos_metadata.json'),
+                    'voz': os.path.join(DATA_DIR, 'extraction_voz_metadata.json'),
+                    'datasource': os.path.join(DATA_DIR, 'extraction_datasource_metadata.json'),
+                }
+
+                meta = {}
+                for key, path in metadata_files.items():
+                    if os.path.exists(path):
+                        with open(path, 'r', encoding='utf-8') as f:
+                            meta[key] = json.load(f)
+                    else:
+                        meta[key] = {}
+
+                conn2 = psycopg2.connect(
+                    host=os.getenv('POSTGRES_HOST'),
+                    port=os.getenv('POSTGRES_PORT'),
+                    database=os.getenv('POSTGRES_DB'),
+                    user=os.getenv('POSTGRES_USER'),
+                    password=os.getenv('POSTGRES_PASSWORD'),
+                )
+                try:
+                    with conn2.cursor() as cur2:
+                        cur2.execute("""
+                            INSERT INTO pipeline_state (
+                                run_timestamp,
+                                datos_latest_record_date,
+                                datos_table1_rows,
+                                datos_table2_rows,
+                                voz_latest_record_date,
+                                voz_table1_rows,
+                                voz_table3_rows,
+                                voz_table4_rows,
+                                datasource_total_rows,
+                                status
+                            ) VALUES (
+                                NOW(),
+                                %(datos_latest)s,
+                                %(datos_t1)s,
+                                %(datos_t2)s,
+                                %(voz_latest)s,
+                                %(voz_t1)s,
+                                %(voz_t3)s,
+                                %(voz_t4)s,
+                                %(ds_rows)s,
+                                'success'
+                            )
+                        """, {
+                            'datos_latest': meta['datos'].get('latest_record_date'),
+                            'datos_t1': int(meta['datos'].get('table1_rows', 0)),
+                            'datos_t2': int(meta['datos'].get('table2_rows', 0)),
+                            'voz_latest': meta['voz'].get('latest_record_date'),
+                            'voz_t1': int(meta['voz'].get('table1_rows', 0)),
+                            'voz_t3': int(meta['voz'].get('table3_rows', 0)),
+                            'voz_t4': int(meta['voz'].get('table4_rows', 0)),
+                            'ds_rows': int(meta['datasource'].get('total_rows', 0)),
+                        })
+                        conn2.commit()
+                    print("\n✅ Estado registrado en pipeline_state")
+                finally:
+                    conn2.close()
+
             return report
 
         except Exception as e:
@@ -362,13 +600,18 @@ with DAG(
         - Porcentaje de registros con Provincia asignada en cada vista
 
         Criterio de éxito: datos raw > 0, ambas vistas existentes, mapeo > 50%.
+
+        **Si el pipeline es exitoso**: registra el estado actual en `pipeline_state`
+        para que el Paso 0 (`check_new_data`) pueda comparar en la próxima ejecución
+        y omitir el procesamiento si no hay datos nuevos.
         """,
     )
 
     # ========== DEPENDENCIAS SECUENCIALES ==========
-    # 1 → 2 → 3 → 4 → 5 → 6 → 7
+    # 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7
     (
-            load_geographic_regions_task
+            check_new_data_task
+            >> load_geographic_regions_task
             >> process_raw_mobile_data
             >> process_raw_voice_data
             >> load_datasource_task
