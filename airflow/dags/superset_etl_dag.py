@@ -456,6 +456,8 @@ with DAG(
                         voice_provincia_pct = cur.fetchone()[0] / voice_view_count * 100
 
             # --- Determinar éxito ---
+            # pipeline_ok: criterio estricto para el reporte ✅/❌
+            # Incluye umbral de mapeo de voz como métrica de calidad.
             pipeline_ok = (
                     mobile_raw_count > 0
                     and voice_raw_count > 0
@@ -463,6 +465,17 @@ with DAG(
                     and voice_view_exists
                     and mobile_map_pct > 50
                     and voice_map_pct > 50
+            )
+
+            # pipeline_ran: criterio para registrar en pipeline_state.
+            # El mapeo de voz bajo (~21%) es esperado porque las llamadas
+            # fallidas/bloqueadas/caídas no generan coordenadas GPS por diseño.
+            # No debe bloquear el registro del estado procesado.
+            pipeline_ran = (
+                    mobile_raw_count > 0
+                    and voice_raw_count > 0
+                    and mobile_view_exists
+                    and voice_view_exists
             )
 
             lines = [
@@ -510,10 +523,12 @@ with DAG(
             print(report)
 
             # ------------------------------------------------------------------
-            # Registrar estado en pipeline_state (solo si el pipeline fue exitoso)
-            # Esto permite al Paso 0 detectar cambios en la próxima ejecución.
+            # Registrar estado en pipeline_state si el pipeline procesó datos.
+            # Se usa pipeline_ran (no pipeline_ok) porque el mapeo bajo de voz
+            # es esperado con llamadas fallidas/bloqueadas/caídas sin GPS.
+            # El status refleja si hubo advertencias de calidad.
             # ------------------------------------------------------------------
-            if pipeline_ok:
+            if pipeline_ran:
                 metadata_files = {
                     'datos': os.path.join(DATA_DIR, 'extraction_datos_metadata.json'),
                     'voz': os.path.join(DATA_DIR, 'extraction_voz_metadata.json'),
@@ -559,7 +574,7 @@ with DAG(
                                 %(voz_t3)s,
                                 %(voz_t4)s,
                                 %(ds_rows)s,
-                                'success'
+                                %(status)s
                             )
                         """, {
                             'datos_latest': meta['datos'].get('latest_record_date'),
@@ -570,6 +585,7 @@ with DAG(
                             'voz_t3': int(meta['voz'].get('table3_rows', 0)),
                             'voz_t4': int(meta['voz'].get('table4_rows', 0)),
                             'ds_rows': int(meta['datasource'].get('total_rows', 0)),
+                            'status': 'success' if pipeline_ok else 'warning',
                         })
                         conn2.commit()
                     print("\n✅ Estado registrado en pipeline_state")
@@ -599,11 +615,16 @@ with DAG(
         - Existencia y recuento de vistas georeferenciadas
         - Porcentaje de registros con Provincia asignada en cada vista
 
-        Criterio de éxito: datos raw > 0, ambas vistas existentes, mapeo > 50%.
+        Criterio de calidad (`pipeline_ok`): datos raw > 0, ambas vistas existentes,
+        mapeo móvil > 50% y mapeo voz > 50%. Determina el ✅/❌ del reporte.
 
-        **Si el pipeline es exitoso**: registra el estado actual en `pipeline_state`
-        para que el Paso 0 (`check_new_data`) pueda comparar en la próxima ejecución
-        y omitir el procesamiento si no hay datos nuevos.
+        Criterio de registro (`pipeline_ran`): datos raw > 0 y ambas vistas existentes.
+        El mapeo de voz bajo (~21%) es esperado — llamadas fallidas/bloqueadas/caídas
+        no generan GPS por diseño regulatorio. No bloquea el registro de estado.
+
+        **Siempre que `pipeline_ran` sea True**: registra en `pipeline_state` con
+        `status='success'` o `status='warning'` según `pipeline_ok`. Esto permite
+        al Paso 0 (`check_new_data`) omitir ejecuciones sin datos nuevos.
         """,
     )
 
