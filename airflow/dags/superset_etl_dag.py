@@ -124,7 +124,7 @@ with DAG(
                         voz_table4_rows,
                         datasource_total_rows
                     FROM pipeline_state
-                    WHERE status = 'success'
+                    WHERE status IN ('success', 'warning')
                     ORDER BY run_timestamp DESC
                     LIMIT 1
                 """)
