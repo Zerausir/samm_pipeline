@@ -30,10 +30,10 @@ with DAG(
         Retorna True  → hay datos nuevos, continuar con el pipeline.
         Retorna False → sin cambios, ShortCircuitOperator omite pasos 1-7.
 
-        Lógica de comparación (dos niveles):
-          1. latest_record_date  — fecha del registro más reciente en SQL Server.
-          2. row counts          — total de filas por tabla.
-        Si cualquier campo difiere → procesar.
+        Lógica de comparación:
+          - latest_record_date de datos móviles y de voz.
+          Los row counts no se comparan (cambian con la ventana deslizante de 5 días).
+        Si la fecha difiere → procesar.
         Si pipeline_state está vacío (primera ejecución) → procesar.
         Si algún archivo de metadatos no existe → procesar (extractor no corrió aún).
         """
@@ -155,7 +155,11 @@ with DAG(
         for k, v in last_state.items():
             print(f"   {k}: {v}")
 
-        diffs = [k for k in new_state if str(new_state[k]) != str(last_state.get(k))]
+        # Comparar solo latest_record_date — los row counts cambian con la ventana
+        # deslizante de 5 días aunque no haya datos nuevos (el inicio de la ventana
+        # avanza entre el run de 08:00 y 13:00 dejando fuera registros procesados).
+        DATE_KEYS = ['datos_latest_record_date', 'voz_latest_record_date']
+        diffs = [k for k in DATE_KEYS if str(new_state[k]) != str(last_state.get(k))]
 
         if diffs:
             print(f"\n🔄 Cambios detectados en: {', '.join(diffs)} → procesando")
@@ -176,9 +180,12 @@ with DAG(
         pipeline exitoso registrado en `pipeline_state` (PostgreSQL).
 
         **Campos comparados:**
-        - `latest_record_date` de datos móviles y de voz
-        - Conteo de filas por tabla (`table1_rows`, `table2_rows`, etc.)
-        - `total_rows` del catálogo de dispositivos
+        - `latest_record_date` de datos móviles y de voz (único criterio de cambio)
+
+        Los row counts NO se comparan: con ventana deslizante de 5 días, el inicio
+        de la ventana avanza entre los runs de 08:00 y 13:00, haciendo que los
+        conteos cambien aunque no haya datos nuevos más allá de la última fecha
+        ya procesada. Comparar solo fechas evita ejecuciones innecesarias.
 
         **Resultado:**
         - `True`  → hay cambios → el pipeline continúa con los pasos 1-7
