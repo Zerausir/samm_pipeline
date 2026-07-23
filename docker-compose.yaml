@@ -4,7 +4,7 @@ x-airflow-common:
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    # Apunta a la BD de metadatos en VM2 (SAMMPBI1)
+    # Apunta a la BD de metadatos en VM1 (SAMMPBI1)
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/airflow_metadata
     AIRFLOW__CORE__FERNET_KEY: '${AIRFLOW__CORE__FERNET_KEY}'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
@@ -17,12 +17,17 @@ x-airflow-common:
     AIRFLOW__CORE__TASK_TIMEOUT: 900
     AIRFLOW__CORE__KILLED_TASK_CLEANUP_TIME: 300
     AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: 300
-    # Pool de conexiones a BD
+    # Pool de conexiones a BD -- valor compartido por defecto para
+    # scheduler/triggerer/dag-processor, que no sirven la UI. El webserver
+    # sobreescribe estos dos valores mas abajo (22-jul-2026: confirmado que
+    # la UI de samm_pipeline tambien se ha colgado antes por el mismo
+    # patron que sietel_pipeline -- agotamiento de pool por polling de la
+    # UI/token de SimpleAuthManager en cada request).
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 3600
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: 'true'
     PYTHONPATH: '/opt/airflow'
-    # Variables para la BD de datos en VM2
+    # Variables para la BD de datos en VM1
     POSTGRES_HOST: ${POSTGRES_HOST}
     POSTGRES_PORT: ${POSTGRES_PORT}
     POSTGRES_DB: ${POSTGRES_DB}
@@ -43,11 +48,23 @@ x-airflow-common:
       condition: service_completed_successfully
 
 services:
-  # PostgreSQL externo en VM2 (SAMMPBI1 — 192.168.129.50)
-  # No se levanta aquí — está gestionado como servicio bare-metal en VM2
+  # PostgreSQL externo en VM1 (SAMMPBI1 — 192.168.129.50)
+  # No se levanta aquí — está gestionado como servicio bare-metal en VM1
 
   airflow-webserver:
     <<: *airflow-common
+    environment:
+      <<: *airflow-common-env
+      # Pool ampliado solo aqui: es el unico componente que sirve la UI/API
+      # HTTP y valida el token de SimpleAuthManager contra la metadata db
+      # en cada request. scheduler/triggerer/dag-processor no sirven
+      # trafico HTTP y se quedan en el valor compartido de arriba (10 +
+      # overflow default de SQLAlchemy) -- no necesitan el mismo margen, y
+      # subir los 4 componentes por igual arriesgaria el max_connections=100
+      # compartido con sietel_pipeline en la misma instancia de VM1
+      # (verificado 22-jul-2026: 22/100 en uso entre ambos pipelines).
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 20
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 30
     command: api-server
     ports:
       - 8080:8080
