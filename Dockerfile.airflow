@@ -1,4 +1,17 @@
-FROM apache/airflow:slim-3.2.0-python3.14
+FROM apache/airflow:slim-3.3.0-python3.14
+# Subido de 3.2.0 a 3.3.0 (23-jul-2026). Mismo cambio aplicado el mismo dia
+# en sietel_pipeline: la UI se colgaba con sqlalchemy.exc.TimeoutError:
+# QueuePool limit reached durante una carga historica larga con el Grid
+# abierto -- el pool ampliado (20+30) tambien se agoto, indicando una fuga
+# de conexiones, consistente con bugs de sesion/auth documentados en el
+# changelog oficial de Airflow (3.2.1: "Fix FAB auth_manager load_user
+# causing PendingRollbackError"; discusion oficial de Airflow confirma un
+# bug identico arreglado en 3.1.5). No hay una entrada de changelog que
+# mencione el bug exacto por su nombre -- monitorear tras el cambio.
+#
+# Se mantiene la version alineada con sietel_pipeline (mismo Dockerfile.airflow
+# base) para no reintroducir el problema de mantenimiento que motivo la
+# alineacion original.
 
 USER root
 
